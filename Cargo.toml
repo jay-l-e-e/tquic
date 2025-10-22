@@ -42,6 +42,9 @@ qlog = ["dep:serde", "dep:serde_json", "dep:serde_derive", "dep:serde_with"]
 h3 = ["dep:sfv"]
 
 [dependencies]
+env_logger = "0.11"
+url = "2.5"
+mio = { version = "1", features = ["net", "os-poll"] }
 bytes = "1"
 rustc-hash = "2"
 slab = "0.4"
@@ -62,15 +65,15 @@ serde_with = { version="3.14", optional=true }
 hex = "0.4"
 priority-queue = "2.7"
 sfv = { version = "0.14", optional=true }
-brotli = "8.0.1"
-flate2 = "1.1.2"
+flate2 = { version = "1.1" }
+brotli = { version = "8.0" }
+zstd = { version = "0.13" }
+futures = { version = "0.3" }
 
 [target."cfg(windows)".dependencies]
 winapi = { version = "0.3", features = ["wincrypt", "ws2def", "ws2ipdef", "ws2tcpip"] }
 
 [dev-dependencies]
-env_logger = "0.11"
-mio = { version = "1", features = ["net", "os-poll"] }
 tempfile = "3.5.0"
 ctor = "0.6"
 criterion = "0.7"

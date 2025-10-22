@@ -349,10 +349,6 @@ impl TransportParams {
                 }
 
                 0x4752 => {
-                    // google_quic_version: 4 bytes
-                    if val.len() != 4 {
-                        return Err(Error::TransportParameterError);
-                    }
                     tp.google_quic_version = Some(u32::from_be_bytes(
                         val.read(4)?.try_into().map_err(|_| Error::BufferTooShort)?,
                     ));

@@ -1338,6 +1338,7 @@ mod ffi;
 #[path = "h3/connection.rs"]
 mod h3_connection;
 
+pub mod client;
 mod codec;
 pub mod endpoint;
 pub mod error;
