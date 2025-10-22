@@ -26,8 +26,8 @@ use std::ptr;
 use std::rc::Rc;
 use std::slice;
 use std::str::FromStr;
-use std::sync::atomic;
 use std::sync::Arc;
+use std::sync::atomic;
 use std::time::Instant;
 
 #[cfg(unix)]
@@ -105,13 +105,14 @@ pub struct iovec {
     iov_len: size_t,       // number of bytes to transfer
 }
 
+use crate::Config;
+use crate::Connection;
+use crate::Endpoint;
+use crate::Result;
+use crate::Shutdown;
 use crate::codec::Decoder;
 use crate::connection::ConnectionStats;
 use crate::error::Error;
-#[cfg(feature = "h3")]
-use crate::h3::connection::Http3Connection;
-#[cfg(feature = "h3")]
-use crate::h3::connection::Http3Priority;
 #[cfg(feature = "h3")]
 use crate::h3::Http3Config;
 #[cfg(feature = "h3")]
@@ -120,15 +121,14 @@ use crate::h3::Http3Event;
 use crate::h3::Http3Headers;
 #[cfg(feature = "h3")]
 use crate::h3::NameValue;
+#[cfg(feature = "h3")]
+use crate::h3::connection::Http3Connection;
+#[cfg(feature = "h3")]
+use crate::h3::connection::Http3Priority;
 #[cfg(feature = "qlog")]
 use crate::qlog::events;
 use crate::tls::SslCtx;
 use crate::tls::TlsConfig;
-use crate::Config;
-use crate::Connection;
-use crate::Endpoint;
-use crate::Result;
-use crate::Shutdown;
 use crate::*;
 
 /// Certificate compression algorithm types for C API compatibility.
@@ -866,7 +866,6 @@ pub extern "C" fn quic_config_set_tls_config(config: &mut Config, tls_config: *m
 #[no_mangle]
 pub extern "C" fn quic_endpoint_new(
     config: *mut Config,
-    is_server: bool,
     handler_methods: *const TransportMethods,
     handler_ctx: TransportContext,
     sender_methods: *const PacketSendMethods,
@@ -881,7 +880,7 @@ pub extern "C" fn quic_endpoint_new(
         methods: sender_methods,
         context: sender_ctx,
     });
-    let e = Endpoint::new(config.clone(), is_server, handler, sender);
+    let e = Endpoint::new(config.clone(), handler, sender);
     let _ = Box::into_raw(config);
     Box::into_raw(Box::new(e))
 }
@@ -1047,12 +1046,6 @@ pub extern "C" fn quic_endpoint_close(endpoint: &mut Endpoint, force: bool) {
 #[no_mangle]
 pub extern "C" fn quic_conn_index(conn: &mut Connection) -> u64 {
     conn.index().unwrap_or(u64::MAX)
-}
-
-/// Check whether the connection is a server connection.
-#[no_mangle]
-pub extern "C" fn quic_conn_is_server(conn: &mut Connection) -> bool {
-    conn.is_server()
 }
 
 /// Check whether the connection handshake is complete.

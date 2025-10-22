@@ -18,9 +18,9 @@ use std::time::Instant;
 
 use super::CongestionController;
 use super::CongestionStats;
+use crate::RecoveryConfig;
 use crate::connection::rtt::RttEstimator;
 use crate::connection::space::SentPacket;
-use crate::RecoveryConfig;
 
 /// Dummpy Configuration.
 #[derive(Debug)]

@@ -18,8 +18,8 @@ use std::net::Ipv6Addr;
 use bytes::Buf;
 use bytes::BufMut;
 
-use crate::error::Error;
 use crate::Result;
+use crate::error::Error;
 
 /// The maximum value for QUIC variable-length integer encoding
 /// See RFC 9000 Section 16

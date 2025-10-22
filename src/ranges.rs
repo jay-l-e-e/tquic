@@ -14,11 +14,11 @@
 
 use std::ops::Range;
 
-use std::collections::btree_map;
 use std::collections::BTreeMap;
 use std::collections::Bound::Excluded;
 use std::collections::Bound::Included;
 use std::collections::Bound::Unbounded;
+use std::collections::btree_map;
 
 /// A set of u64 values, support range operations, like insert, remove, etc.
 #[derive(Clone, PartialEq, Eq, PartialOrd)]
@@ -91,22 +91,22 @@ impl RangeSet {
         }
 
         // Check for any overlap between the given range and the preceding existing range.
-        if let Some(r) = self.prev_to(range.start) {
-            if r.end > range.start {
-                self.set.remove(&r.start);
+        if let Some(r) = self.prev_to(range.start)
+            && r.end > range.start
+        {
+            self.set.remove(&r.start);
 
-                if r.start < range.start {
-                    self.set.insert(r.start, range.start);
-                }
+            if r.start < range.start {
+                self.set.insert(r.start, range.start);
+            }
 
-                if r.end > range.end {
-                    self.set.insert(range.end, r.end);
-                }
+            if r.end > range.end {
+                self.set.insert(range.end, r.end);
+            }
 
-                // The following ranges would not overlap with the given range, return prematurely.
-                if r.end >= range.end {
-                    return;
-                }
+            // The following ranges would not overlap with the given range, return prematurely.
+            if r.end >= range.end {
+                return;
             }
         }
 
@@ -135,7 +135,7 @@ impl RangeSet {
         let ranges: Vec<Range<u64>> = self
             .set
             .range((Unbounded, Included(&elem)))
-            .map(|(&s, &e)| (s..e))
+            .map(|(&s, &e)| s..e)
             .collect();
 
         for r in ranges {
@@ -171,10 +171,10 @@ impl RangeSet {
             }
         }
 
-        if let Some(r) = self.next_after(range.start) {
-            if r.start < range.end {
-                new_end = r.start
-            }
+        if let Some(r) = self.next_after(range.start)
+            && r.start < range.end
+        {
+            new_end = r.start
         }
 
         Some(new_start..new_end)
@@ -221,7 +221,7 @@ impl RangeSet {
     fn prev_to(&self, elem: u64) -> Option<Range<u64>> {
         self.set
             .range((Unbounded, Included(elem)))
-            .map(|(&s, &e)| (s..e))
+            .map(|(&s, &e)| s..e)
             .next_back()
     }
 
@@ -229,7 +229,7 @@ impl RangeSet {
     fn next_to(&self, elem: u64) -> Option<Range<u64>> {
         self.set
             .range((Included(elem), Unbounded))
-            .map(|(&s, &e)| (s..e))
+            .map(|(&s, &e)| s..e)
             .next()
     }
 
@@ -237,21 +237,21 @@ impl RangeSet {
     fn next_after(&self, elem: u64) -> Option<Range<u64>> {
         self.set
             .range((Excluded(elem), Unbounded))
-            .map(|(&s, &e)| (s..e))
+            .map(|(&s, &e)| s..e)
             .next()
     }
 
     /// Check if the element exists or not
     pub fn contains(&self, elem: u64) -> bool {
-        if let Some(prev) = self.prev_to(elem) {
-            if prev.contains(&elem) {
-                return true;
-            }
+        if let Some(prev) = self.prev_to(elem)
+            && prev.contains(&elem)
+        {
+            return true;
         }
-        if let Some(next) = self.next_to(elem) {
-            if next.contains(&elem) {
-                return true;
-            }
+        if let Some(next) = self.next_to(elem)
+            && next.contains(&elem)
+        {
+            return true;
         }
         false
     }
@@ -576,7 +576,9 @@ mod tests {
         assert_eq!(r.len(), 4);
         assert_eq!(
             &r.flatten().collect::<Vec<u64>>(),
-            &[1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 15, 16, 17, 18, 19, 22, 23, 24, 25, 26]
+            &[
+                1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 15, 16, 17, 18, 19, 22, 23, 24, 25, 26
+            ]
         );
 
         // Try to remove an empty range [1, 1), nothing should change.
@@ -584,7 +586,9 @@ mod tests {
         assert_eq!(r.len(), 4);
         assert_eq!(
             &r.flatten().collect::<Vec<u64>>(),
-            &[1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 15, 16, 17, 18, 19, 22, 23, 24, 25, 26]
+            &[
+                1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 15, 16, 17, 18, 19, 22, 23, 24, 25, 26
+            ]
         );
 
         // Try to remove range [1, 2), the left part of first range.
@@ -593,7 +597,9 @@ mod tests {
         assert_eq!(r.len(), 4);
         assert_eq!(
             &r.flatten().collect::<Vec<u64>>(),
-            &[2, 3, 4, 5, 8, 9, 10, 11, 12, 15, 16, 17, 18, 19, 22, 23, 24, 25, 26]
+            &[
+                2, 3, 4, 5, 8, 9, 10, 11, 12, 15, 16, 17, 18, 19, 22, 23, 24, 25, 26
+            ]
         );
 
         // Try to remove range [3, 6), the right part of first range.
@@ -808,7 +814,9 @@ mod tests {
         assert_eq!(r.len(), 4);
         assert_eq!(
             &r.flatten().collect::<Vec<u64>>(),
-            &[1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 15, 16, 17, 18, 19, 22, 23, 24, 25, 26]
+            &[
+                1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 15, 16, 17, 18, 19, 22, 23, 24, 25, 26
+            ]
         );
 
         // Clear the set, nothing should remain.
@@ -933,7 +941,9 @@ mod tests {
         assert_eq!(r.len(), 1);
         assert_eq!(
             &r.flatten().collect::<Vec<u64>>(),
-            &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+            &[
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
+            ]
         );
 
         // Add new elems, which has a gap with existing ranges.

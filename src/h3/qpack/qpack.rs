@@ -18,12 +18,12 @@ use log::trace;
 
 use crate::codec::Decoder;
 use crate::codec::Encoder;
-use crate::h3::qpack::prefix_int::*;
-use crate::h3::qpack::static_table::*;
 use crate::h3::Header;
 use crate::h3::Http3Error;
 use crate::h3::NameValue;
 use crate::h3::Result;
+use crate::h3::qpack::prefix_int::*;
+use crate::h3::qpack::static_table::*;
 
 /// An indexed field line representation starts with the '1' 1-bit pattern,
 /// followed by the 'T' bit, indicating whether the reference is into the
@@ -228,8 +228,7 @@ impl QpackDecoder {
         buf = &buf[off..];
         trace!(
             "QpackDecoder Header count={} base={}",
-            req_insert_count,
-            base
+            req_insert_count, base
         );
 
         while !buf.is_empty() {
@@ -270,9 +269,7 @@ impl QpackDecoder {
                     buf = &buf[off..];
                     trace!(
                         "QpackDecoder Literal With Name refer name_idx={} static={} value={:?}",
-                        name_idx,
-                        static_idx,
-                        value
+                        name_idx, static_idx, value
                     );
 
                     if !static_idx {

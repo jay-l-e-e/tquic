@@ -68,6 +68,7 @@ use std::time::Instant;
 
 use bytes::Buf;
 use bytes::BufMut;
+use log::debug;
 use rand::RngCore;
 use ring::aead;
 use ring::aead::LessSafeKey;
@@ -80,12 +81,23 @@ use crate::connection::stream;
 use crate::tls::TlsSession;
 use crate::token::ResetToken;
 use crate::trans_param::TransportParams;
+use rand::Rng;
 
 /// The current QUIC wire version.
 pub const QUIC_VERSION: u32 = QUIC_VERSION_V1;
 
 /// The QUIC Version 1
 pub const QUIC_VERSION_V1: u32 = 0x0000_0001;
+
+fn generate_grease_version32() -> u32 {
+    // Generate GREASE version where each byte is 0x?A (0x0a, 0x1a, ..., 0xfa).
+    let mut bytes = [0u8; 4];
+    for b in &mut bytes {
+        let hi = (rand::rng().next_u32() & 0x0f) as u8;
+        *b = (hi << 4) | 0x0a;
+    }
+    u32::from_be_bytes(bytes)
+}
 
 /// The Connection ID MUST NOT exceed 20 bytes in QUIC version 1.
 /// See RFC 9000 Section 17.2
@@ -111,7 +123,7 @@ const MAX_RESET_PACKET_LEN: usize = 42;
 const LENGTH_FIELD_LEN: usize = 2;
 
 /// The minimum length of Initial packets sent by a client.
-pub const MIN_CLIENT_INITIAL_LEN: usize = 1200;
+pub const MIN_CLIENT_INITIAL_LEN: usize = 1250;
 
 const MIN_PAYLOAD_LEN: usize = 4;
 
@@ -119,7 +131,7 @@ const MIN_PAYLOAD_LEN: usize = 4;
 const MAX_ACK_RANGES: usize = 68;
 
 /// Default outgoing udp datagram payloads size.
-const DEFAULT_SEND_UDP_PAYLOAD_SIZE: usize = 1200;
+const DEFAULT_SEND_UDP_PAYLOAD_SIZE: usize = 1250;
 
 /// An endpoint MUST limit the amount of data it sends to the unvalidated
 /// address to three times the amount of data received from that address.
@@ -242,7 +254,7 @@ impl RandomConnectionIdGenerator {
 impl ConnectionIdGenerator for RandomConnectionIdGenerator {
     fn generate(&mut self) -> ConnectionId {
         let mut bytes = [0; MAX_CID_LEN];
-        rand::thread_rng().fill_bytes(&mut bytes[..self.cid_len]);
+        rand::rng().fill_bytes(&mut bytes[..self.cid_len]);
         ConnectionId::new(&bytes[..self.cid_len])
     }
 
@@ -338,6 +350,10 @@ pub struct Config {
     /// Length of source cid.
     cid_len: usize,
 
+    /// Omit SCID in client Initial packet headers.
+    /// Applicable to Client only.
+    omit_client_initial_scid: bool,
+
     /// Anti-amplification factor.
     anti_amplification_factor: usize,
 
@@ -368,21 +384,34 @@ impl Config {
     /// ## Examples:
     ///
     /// ```
-    /// let mut conf = tquic::Config::new()?;
+    /// let mut conf = tquic_mimic_chromium_client::Config::new()?;
     /// conf.set_max_idle_timeout(30000);
     /// let alpn =  vec![b"h3".to_vec()];
-    /// let mut tls_config = tquic::TlsConfig::new_client_config(alpn, true)?;
+    /// let mut tls_config = tquic_mimic_chromium_client::TlsConfig::new_client_config(alpn, true)?;
     /// conf.set_tls_config(tls_config);
-    /// # Ok::<(), tquic::error::Error>(())
+    /// # Ok::<(), tquic_mimic_chromium_client::error::Error>(())
     /// ```
     pub fn new() -> Result<Self> {
+        let grease_ver = generate_grease_version32();
         let local_transport_params = TransportParams {
-            initial_max_data: 10485760,
-            initial_max_stream_data_bidi_local: 5242880,
-            initial_max_stream_data_bidi_remote: 2097152,
-            initial_max_stream_data_uni: 1048576,
-            initial_max_streams_bidi: 200,
-            initial_max_streams_uni: 100,
+            // Defaults aligned with requested parameters
+            max_idle_timeout: 30000,
+            max_udp_payload_size: 1472,
+            initial_max_data: 15728640,
+            initial_max_stream_data_bidi_local: 6291456,
+            initial_max_stream_data_bidi_remote: 6291456,
+            initial_max_stream_data_uni: 6291456,
+            initial_max_streams_bidi: 100,
+            initial_max_streams_uni: 103,
+            max_datagram_frame_size: 65536,
+            // Version information and Google QUIC parameters
+            version_information: Some(crate::trans_param::VersionInformation {
+                chosen_version: QUIC_VERSION_V1,
+                other_versions: vec![grease_ver, QUIC_VERSION_V1],
+            }),
+            google_quic_version: Some(QUIC_VERSION_V1),
+            // If not explicitly set by user, this will be randomized per-encode.
+            google_initial_rtt: None,
             ..TransportParams::default()
         };
 
@@ -400,6 +429,7 @@ impl Config {
             address_token_key: Self::rand_address_token_key()?,
             reset_token_key,
             cid_len: 8,
+            omit_client_initial_scid: true,
             anti_amplification_factor: ANTI_AMPLIFICATION_FACTOR,
             send_batch_size: 64,
             zerortt_buffer_size: 1000,
@@ -426,6 +456,36 @@ impl Config {
     /// default value is `65527`.
     pub fn set_recv_udp_payload_size(&mut self, v: u16) {
         self.local_transport_params.max_udp_payload_size = cmp::min(v as u64, VINT_MAX);
+    }
+
+    /// Set the `max_datagram_frame_size` transport parameter (QUIC DATAGRAM/RFC 9221).
+    /// A value of 0 disables DATAGRAM.
+    pub fn set_max_datagram_frame_size(&mut self, v: u64) {
+        self.local_transport_params.max_datagram_frame_size = cmp::min(v, VINT_MAX);
+    }
+
+    /// Set the `version_information` transport parameter (draft-ietf-quic-version-negotiation).
+    pub fn set_version_information(&mut self, chosen_version: u32, other_versions: Vec<u32>) {
+        self.local_transport_params.version_information =
+            Some(crate::trans_param::VersionInformation {
+                chosen_version,
+                other_versions,
+            });
+    }
+
+    /// Set the Google QUIC version transport parameter (0x4752).
+    pub fn set_google_quic_version(&mut self, v: u32) {
+        self.local_transport_params.google_quic_version = Some(v);
+    }
+
+    /// Set the Google Initial RTT transport parameter in microseconds (0x3127).
+    pub fn set_google_initial_rtt_us(&mut self, v: u32) {
+        self.local_transport_params.google_initial_rtt = Some(v);
+    }
+
+    /// Disable randomization and clear google_initial_rtt so it is randomized again.
+    pub fn clear_google_initial_rtt(&mut self) {
+        self.local_transport_params.google_initial_rtt = None;
     }
 
     /// Enable the Datagram Packetization Layer Path MTU Discovery
@@ -704,6 +764,17 @@ impl Config {
         self.cid_len = cmp::min(v, MAX_CID_LEN);
     }
 
+    /// Omit SCID in client Initial headers (DCID still present).
+    /// Applicable to Client only.
+    pub fn set_omit_client_initial_scid(&mut self, v: bool) {
+        self.omit_client_initial_scid = v;
+    }
+
+    /// Return whether client should omit SCID in Initial.
+    pub fn omit_client_initial_scid(&self) -> bool {
+        self.omit_client_initial_scid
+    }
+
     /// Set the anti-amplification factor.
     ///
     /// The server limits the data sent to an unvalidated address to
@@ -765,19 +836,23 @@ impl Config {
     /// Generate random address token key.
     fn rand_address_token_key() -> Result<Vec<LessSafeKey>> {
         let mut key = [0_u8; 16];
-        rand::thread_rng().fill_bytes(&mut key);
+        rand::rng().fill_bytes(&mut key);
         Ok(vec![LessSafeKey::new(
             UnboundKey::new(&aead::AES_128_GCM, &key).map_err(|_| Error::CryptoFail)?,
         )])
     }
 
     /// Create new tls session.
-    fn new_tls_session(&self, server_name: Option<&str>, is_server: bool) -> Result<TlsSession> {
+    fn new_tls_session(&self, server_name: Option<&str>) -> Result<TlsSession> {
         if self.tls_config_selector.is_none() {
+            debug!("tls config selector is not set");
             return Err(Error::TlsFail("tls config selector is not set".into()));
         }
         match self.tls_config_selector.as_ref().unwrap().get_default() {
-            Some(tls_config) => tls_config.new_session(server_name, is_server),
+            Some(tls_config) => {
+                debug!("new tls session");
+                tls_config.new_session(server_name)
+            }
             None => Err(Error::TlsFail("get tls config failed".into())),
         }
     }
@@ -1224,8 +1299,8 @@ mod tests {
 }
 
 pub use crate::congestion_control::CongestionControlAlgorithm;
-pub use crate::connection::path::Path;
 pub use crate::connection::Connection;
+pub use crate::connection::path::Path;
 pub use crate::endpoint::Endpoint;
 pub use crate::error::Error;
 pub use crate::multipath_scheduler::MultipathAlgorithm;

@@ -21,12 +21,12 @@ use std::time::Instant;
 use lazy_static::lazy_static;
 use libfuzzer_sys::fuzz_target;
 
-use tquic::Config;
-use tquic::ConnectionId;
-use tquic::TlsConfig;
+use tquic_mimic_chromium_client::Config;
+use tquic_mimic_chromium_client::ConnectionId;
+use tquic_mimic_chromium_client::TlsConfig;
 
 lazy_static! {
-    static ref CONFIG: Mutex<tquic::Config> = {
+    static ref CONFIG: Mutex<tquic_mimic_chromium_client::Config> = {
         let mut conf = Config::new().unwrap();
         let crt_file = "fuzz/conf/cert.crt";
         let key_file = "fuzz/conf/cert.key";
@@ -41,13 +41,13 @@ fuzz_target!(|data: &[u8]| {
     let mut buf = data.to_vec();
     let local: SocketAddr = "127.0.0.1:9999".parse().unwrap();
     let remote: SocketAddr = "127.0.0.1:443".parse().unwrap();
-    let info = tquic::PacketInfo {
+    let info = tquic_mimic_chromium_client::PacketInfo {
         src: remote,
         dst: local,
         time: Instant::now(),
     };
 
-    let mut conn = tquic::Connection::new_server(
+    let mut conn = tquic_mimic_chromium_client::Connection::new_server(
         &ConnectionId::random(),
         local,
         remote,

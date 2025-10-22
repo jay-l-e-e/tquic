@@ -36,9 +36,9 @@ use rand::Rng;
 use super::delivery_rate::DeliveryRateEstimator;
 use super::minmax::MinMax;
 use super::{CongestionController, CongestionStats};
+use crate::RecoveryConfig;
 use crate::connection::rtt::RttEstimator;
 use crate::connection::space::{RateSamplePacketState, SentPacket};
-use crate::RecoveryConfig;
 
 /// BBR configurable parameters.
 #[derive(Debug)]
@@ -988,12 +988,12 @@ impl Bbr3 {
         // probing for bandwidth, using round count and wall clock.
 
         // Decide random round-trip bound for wait:  0 or 1
-        self.rounds_since_bw_probe = rand::thread_rng().gen_range(0..PROBE_BW_RAND_ROUNDS);
+        self.rounds_since_bw_probe = rand::rng().random_range(0..PROBE_BW_RAND_ROUNDS);
 
         // Decide the random wall clock bound for wait: 2..3 sec
         self.bw_probe_wait = Duration::from_millis(
-            rand::thread_rng()
-                .gen_range(PROBE_BW_MIN_WAIT_TIME_IN_MSEC..PROBE_BW_MAX_WAIT_TIME_IN_MSEC),
+            rand::rng()
+                .random_range(PROBE_BW_MIN_WAIT_TIME_IN_MSEC..PROBE_BW_MAX_WAIT_TIME_IN_MSEC),
         );
     }
 
@@ -1294,13 +1294,13 @@ impl Bbr3 {
     }
 
     fn check_probe_rtt_done(&mut self, now: Instant) {
-        if let Some(probe_rtt_done_stamp) = self.probe_rtt_done_stamp {
-            if now > probe_rtt_done_stamp {
-                // Schedule next ProbeRtt.
-                self.probe_rtt_min_stamp = now;
-                self.restore_cwnd();
-                self.exit_probe_rtt(now);
-            }
+        if let Some(probe_rtt_done_stamp) = self.probe_rtt_done_stamp
+            && now > probe_rtt_done_stamp
+        {
+            // Schedule next ProbeRtt.
+            self.probe_rtt_min_stamp = now;
+            self.restore_cwnd();
+            self.exit_probe_rtt(now);
         }
     }
 

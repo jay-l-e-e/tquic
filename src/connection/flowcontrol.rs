@@ -122,10 +122,10 @@ impl FlowControl {
     /// is within 2 * srtt, increase the window size by 2, but
     /// not exceeding the max_window.
     pub fn autotune_window(&mut self, now: Instant, srtt: Duration) {
-        if let Some(last_updated) = self.last_updated {
-            if now - last_updated < srtt * 2 {
-                self.window = std::cmp::min(self.window * 2, self.max_window);
-            }
+        if let Some(last_updated) = self.last_updated
+            && now - last_updated < srtt * 2
+        {
+            self.window = std::cmp::min(self.window * 2, self.max_window);
         }
     }
 

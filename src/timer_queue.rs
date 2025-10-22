@@ -71,11 +71,11 @@ impl TimerQueue {
 
     /// Return the next expired timer if any.
     pub fn next_expire(&mut self, now: Instant) -> Option<Index> {
-        if let Some((_, expires_at)) = self.timers.peek_min() {
-            if *expires_at <= now {
-                let idx = self.timers.pop_min().map(|(idx, _)| idx).unwrap();
-                return Some(idx);
-            }
+        if let Some((_, expires_at)) = self.timers.peek_min()
+            && *expires_at <= now
+        {
+            let idx = self.timers.pop_min().map(|(idx, _)| idx).unwrap();
+            return Some(idx);
         }
         None
     }

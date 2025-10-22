@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_map::IterMut;
 use std::collections::VecDeque;
+use std::collections::hash_map::IterMut;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -148,7 +148,7 @@ impl PacketNumSpace {
     pub fn new(id: SpaceId) -> Self {
         PacketNumSpace {
             id,
-            next_pkt_num: 0,
+            next_pkt_num: if id == SpaceId::Initial { 1 } else { 0 },
             consecutive_non_ack_eliciting_sent: 0,
             lowest_1rtt_pkt_num: u64::MAX,
             largest_rx_pkt_num: 0,

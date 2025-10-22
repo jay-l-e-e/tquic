@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::Error;
+use crate::MultipathConfig;
+use crate::Result;
 use crate::connection::path::PathMap;
 use crate::connection::space::PacketNumSpaceMap;
 use crate::connection::stream::StreamMap;
 use crate::multipath_scheduler::MultipathScheduler;
-use crate::Error;
-use crate::MultipathConfig;
-use crate::Result;
 
 /// MinRttScheduler prioritizes sending data on the path with the lowest RTT
 /// until its cwnd is fully utilized, and then proceeds to send data on the path

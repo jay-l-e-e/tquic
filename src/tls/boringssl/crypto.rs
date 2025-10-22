@@ -19,9 +19,9 @@ use libc::c_void;
 use ring::aead;
 use ring::hkdf;
 
-use crate::tls::key;
 use crate::Error;
 use crate::Result;
+use crate::tls::key;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Algorithm {
@@ -320,7 +320,7 @@ impl Open {
 }
 
 /// Derive initial secrets.
-pub fn derive_initial_secrets(cid: &[u8], version: u32, is_server: bool) -> Result<(Open, Seal)> {
+pub fn derive_initial_secrets(cid: &[u8], version: u32) -> Result<(Open, Seal)> {
     let mut secret = [0; 32];
     let aead = Algorithm::Aes128Gcm;
     let key_len = aead.key_len();
@@ -344,13 +344,6 @@ pub fn derive_initial_secrets(cid: &[u8], version: u32, is_server: bool) -> Resu
     key::derive_pkt_key(aead.hkdf_algor(), &secret, &mut server_key)?;
     key::derive_pkt_iv(aead.hkdf_algor(), &secret, &mut server_iv)?;
     key::derive_hdr_key(aead.hkdf_algor(), &secret, &mut server_hp_key)?;
-
-    if is_server {
-        return Ok((
-            Open::new(aead, secret.to_vec(), client_hp_key, client_key, client_iv)?,
-            Seal::new(aead, secret.to_vec(), server_hp_key, server_key, server_iv)?,
-        ));
-    }
 
     Ok((
         Open::new(aead, secret.to_vec(), server_hp_key, server_key, server_iv)?,
@@ -423,7 +416,7 @@ struct EvpAeadCtx {
     tag_len: u8,
 }
 
-extern "C" {
+unsafe extern "C" {
     fn EVP_aead_aes_128_gcm() -> *const EvpAead;
 
     fn EVP_aead_aes_256_gcm() -> *const EvpAead;

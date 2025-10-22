@@ -72,6 +72,14 @@ fn new_boringssl_cmake_config() -> cmake::Config {
 
     let mut boringssl_cmake = cmake::Config::new("deps/boringssl");
 
+    // Align MSVC runtime with Rust's choice (/MD) in all configurations.
+    // Rust uses the non-debug CRT even for debug builds, so force CMake
+    // to use MultiThreadedDLL to avoid MSVCRTD/MSVCRT conflicts.
+    if cfg!(target_env = "msvc") {
+        boringssl_cmake.define("CMAKE_POLICY_DEFAULT_CMP0091", "NEW");
+        boringssl_cmake.define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreadedDLL");
+    }
+
     match os.as_ref() {
         "android" => {
             for (android_arch, params) in CMAKE_PARAMS_ANDROID_NDK {

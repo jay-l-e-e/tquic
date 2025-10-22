@@ -105,16 +105,10 @@ pub struct VantagePoint {
 
 impl VantagePoint {
     /// Return a Server or Client VantagePoint
-    pub fn new(name: Option<String>, is_server: bool) -> VantagePoint {
-        let vp_type = if is_server {
-            VantagePointType::Server
-        } else {
-            VantagePointType::Client
-        };
-
+    pub fn new(name: Option<String>) -> VantagePoint {
         Self {
             name,
-            r#type: vp_type,
+            r#type: VantagePointType::Client,
             flow: None,
         }
     }
@@ -292,13 +286,13 @@ impl QlogWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::qlog::events::tests::new_test_pkt_hdr;
     use crate::qlog::events::ConnectionState;
     use crate::qlog::events::EventData;
     use crate::qlog::events::PacketType;
     use crate::qlog::events::QuicFrame;
     use crate::qlog::events::QuicPacketSent;
     use crate::qlog::events::RawInfo;
+    use crate::qlog::events::tests::new_test_pkt_hdr;
 
     pub fn new_test_trace_seq() -> TraceSeq {
         TraceSeq::new(

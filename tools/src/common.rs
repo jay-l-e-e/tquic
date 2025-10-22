@@ -15,20 +15,20 @@
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 
-use clap::builder::PossibleValue;
 use clap::ValueEnum;
+use clap::builder::PossibleValue;
 use env_logger::Target;
 use log::*;
-use mio::net::UdpSocket;
 use mio::Interest;
 use mio::Registry;
 use mio::Token;
+use mio::net::UdpSocket;
 use rustc_hash::FxHashMap;
 use slab::Slab;
 
-use tquic::CertCompressionAlgorithm;
-use tquic::PacketInfo;
-use tquic::PacketSendHandler;
+use tquic_mimic_chromium_client::CertCompressionAlgorithm;
+use tquic_mimic_chromium_client::PacketInfo;
+use tquic_mimic_chromium_client::PacketSendHandler;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -215,7 +215,10 @@ impl QuicSocket {
 }
 
 impl PacketSendHandler for QuicSocket {
-    fn on_packets_send(&self, pkts: &[(Vec<u8>, PacketInfo)]) -> tquic::Result<usize> {
+    fn on_packets_send(
+        &self,
+        pkts: &[(Vec<u8>, PacketInfo)],
+    ) -> tquic_mimic_chromium_client::Result<usize> {
         let mut count = 0;
         for (pkt, info) in pkts {
             if let Err(e) = self.send_to(pkt, info.src, info.dst) {
@@ -223,10 +226,9 @@ impl PacketSendHandler for QuicSocket {
                     debug!("socket send would block");
                     return Ok(count);
                 }
-                return Err(tquic::Error::InvalidOperation(format!(
-                    "socket send_to(): {:?}",
-                    e
-                )));
+                return Err(tquic_mimic_chromium_client::Error::InvalidOperation(
+                    format!("socket send_to(): {:?}", e),
+                ));
             }
             debug!("written {} bytes", pkt.len());
             count += 1;
@@ -249,4 +251,52 @@ pub fn log_target(log_file: &Option<String>) -> Result<Target> {
     }
 
     Ok(Target::Stderr)
+}
+
+pub fn decode_http_body_to_string(body: &[u8], content_encoding: Option<&[u8]>) -> String {
+    use std::io::Read;
+
+    let enc = content_encoding
+        .and_then(|e| std::str::from_utf8(e).ok())
+        .map(|s| s.to_ascii_lowercase());
+
+    if let Some(enc) = enc.as_deref() {
+        match enc {
+            "gzip" => {
+                let mut d = flate2::read::GzDecoder::new(body);
+                let mut out = String::new();
+                if d.read_to_string(&mut out).is_ok() {
+                    return out;
+                }
+            }
+            "deflate" => {
+                let mut d = flate2::read::DeflateDecoder::new(body);
+                let mut out = String::new();
+                if d.read_to_string(&mut out).is_ok() {
+                    return out;
+                }
+            }
+            "br" => {
+                let mut d = brotli::Decompressor::new(body, 4096);
+                let mut out = Vec::new();
+                if std::io::copy(&mut d, &mut out).is_ok() {
+                    if let Ok(s) = String::from_utf8(out) {
+                        return s;
+                    }
+                }
+            }
+            "zstd" => {
+                if let Ok(mut d) = zstd::Decoder::new(body) {
+                    let mut out = String::new();
+                    if d.read_to_string(&mut out).is_ok() {
+                        return out;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Fallback: try UTF-8 directly, else lossily decode
+    String::from_utf8(body.to_vec()).unwrap_or_else(|_| String::from_utf8_lossy(body).into_owned())
 }

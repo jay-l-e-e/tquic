@@ -912,7 +912,6 @@ void quic_config_set_tls_config(struct quic_config_t *config, struct quic_tls_co
  * resources outlive the endpoint and release them correctly.
  */
 struct quic_endpoint_t *quic_endpoint_new(struct quic_config_t *config,
-                                          bool is_server,
                                           const struct quic_transport_methods_t *handler_methods,
                                           quic_transport_context_t handler_ctx,
                                           const struct quic_packet_send_methods_t *sender_methods,
@@ -996,11 +995,6 @@ void quic_endpoint_close(struct quic_endpoint_t *endpoint, bool force);
  * Get index of the connection
  */
 uint64_t quic_conn_index(struct quic_conn_t *conn);
-
-/**
- * Check whether the connection is a server connection.
- */
-bool quic_conn_is_server(struct quic_conn_t *conn);
 
 /**
  * Check whether the connection handshake is complete.

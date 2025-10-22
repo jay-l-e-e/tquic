@@ -15,6 +15,9 @@
 use log::*;
 use std::time::Instant;
 
+use crate::Error;
+use crate::MultipathConfig;
+use crate::Result;
 use crate::connection::path::PathMap;
 use crate::connection::space::BufferType;
 use crate::connection::space::PacketNumSpaceMap;
@@ -22,9 +25,6 @@ use crate::connection::space::SentPacket;
 use crate::connection::stream::StreamMap;
 use crate::frame::Frame;
 use crate::multipath_scheduler::MultipathScheduler;
-use crate::Error;
-use crate::MultipathConfig;
-use crate::Result;
 
 /// RedundantScheduler sends all packets redundantly on all available paths.
 ///

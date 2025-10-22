@@ -14,11 +14,11 @@
 
 use std::collections::VecDeque;
 
+use crate::ConnectionId;
+use crate::Result;
 use crate::error::Error;
 use crate::frame::Frame;
 use crate::token::ResetToken;
-use crate::ConnectionId;
-use crate::Result;
 
 const MAX_CIDS_COUNT: u64 = 16;
 
@@ -759,9 +759,10 @@ mod tests {
         assert_eq!(cids.unused_scids(), 0);
         assert_eq!(cids.unused_dcids(), 0);
 
-        assert!(cids
-            .add_scid(ConnectionId::random(), None, false, None, false)
-            .is_err());
+        assert!(
+            cids.add_scid(ConnectionId::random(), None, false, None, false)
+                .is_err()
+        );
         assert!(cids.add_dcid(ConnectionId::random(), 1, 1, 1).is_err());
 
         Ok(())
