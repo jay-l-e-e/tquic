@@ -20,14 +20,14 @@ use std::time::Instant;
 use self::scheduler_minrtt::*;
 use self::scheduler_redundant::*;
 use self::scheduler_rr::*;
-use crate::connection::path::PathMap;
-use crate::connection::space::PacketNumSpaceMap;
-use crate::connection::space::SentPacket;
-use crate::connection::stream::StreamMap;
 use crate::Error;
 use crate::MultipathConfig;
 use crate::PathEvent;
 use crate::Result;
+use crate::connection::path::PathMap;
+use crate::connection::space::PacketNumSpaceMap;
+use crate::connection::space::SentPacket;
+use crate::connection::stream::StreamMap;
 
 /// MultipathScheduler is a packet scheduler that decides the path over which
 /// the next QUIC packet will be sent.
@@ -121,10 +121,10 @@ pub(crate) fn buffer_required(algor: MultipathAlgorithm) -> bool {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::connection::stream;
     use crate::Config;
     use crate::Path;
     use crate::TransportParams;
+    use crate::connection::stream;
     use std::time::Duration;
 
     pub(crate) struct MultipathTester {
@@ -137,13 +137,13 @@ pub(crate) mod tests {
         /// Create context for multipath scheduler.
         pub(crate) fn new() -> Result<MultipathTester> {
             let path = new_test_path("127.0.0.1:443", "127.0.0.1:8443", true, 200);
-            let mut paths = PathMap::new(path, 8, crate::ANTI_AMPLIFICATION_FACTOR, true);
+            let mut paths = PathMap::new(path, 8, crate::ANTI_AMPLIFICATION_FACTOR);
             paths.enable_multipath();
 
             let spaces = PacketNumSpaceMap::new();
 
             let params = stream::StreamTransportParams::from(&TransportParams::default());
-            let streams = StreamMap::new(true, 1024 * 1024, 1024 * 1024, params);
+            let streams = StreamMap::new(1024 * 1024, 1024 * 1024, params);
 
             Ok(MultipathTester {
                 paths,

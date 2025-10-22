@@ -27,13 +27,13 @@ use std::time::Instant;
 
 use log::*;
 
-use super::minmax::MinMax;
 use super::CongestionController;
 use super::CongestionStats;
+use super::minmax::MinMax;
+use crate::RecoveryConfig;
 use crate::connection::rtt::RttEstimator;
 use crate::connection::space::RateSamplePacketState;
 use crate::connection::space::SentPacket;
-use crate::RecoveryConfig;
 
 /// Delta: determines how much to weigh delay compared to throughput.
 pub const COPA_DELTA: f64 = 0.04;

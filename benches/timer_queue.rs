@@ -15,13 +15,13 @@
 use std::time::Duration;
 use std::time::Instant;
 
+use criterion::Criterion;
 use criterion::criterion_group;
 use criterion::criterion_main;
-use criterion::Criterion;
 
 use timer_heap::TimerHeap;
 use timer_heap::TimerType;
-use tquic::timer_queue::TimerQueue;
+use tquic_mimic_chromium_client::timer_queue::TimerQueue;
 
 pub fn time_remaining_benchmark_with_same_timer(c: &mut Criterion) {
     let mut tq = TimerQueue::new();

@@ -117,11 +117,7 @@ impl RttEstimator {
                 self.latest_rtt
             };
 
-            let var_sample = if smoothed_rtt > adjusted_rtt {
-                smoothed_rtt - adjusted_rtt
-            } else {
-                adjusted_rtt - smoothed_rtt
-            };
+            let var_sample = smoothed_rtt.abs_diff(adjusted_rtt);
 
             self.rttvar = (3 * self.rttvar + var_sample) / 4;
             self.smoothed_rtt = Some((7 * smoothed_rtt + adjusted_rtt) / 8);

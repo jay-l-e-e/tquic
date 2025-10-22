@@ -4,7 +4,6 @@
 
 The crate contains client and server tools based on TQUIC:
 - tquic_client: A QUIC and HTTP/3 client. It's also an HTTP/3 benchmarking tool.
-- tquic_server: A QUIC and HTTP/3 static file server.
 
 
 ## Installation

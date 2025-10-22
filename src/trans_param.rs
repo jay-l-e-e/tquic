@@ -18,6 +18,9 @@ use std::net::Ipv6Addr;
 use std::net::SocketAddrV4;
 use std::net::SocketAddrV6;
 
+use crate::ConnectionId;
+use crate::MAX_STREAMS_PER_TYPE;
+use crate::Result;
 use crate::codec;
 use crate::codec::Decoder;
 use crate::codec::Encoder;
@@ -28,9 +31,54 @@ use crate::qlog;
 use crate::qlog::events::EventData;
 use crate::tls;
 use crate::token::ResetToken;
-use crate::ConnectionId;
-use crate::Result;
-use crate::MAX_STREAMS_PER_TYPE;
+use rand::RngCore;
+
+fn generate_grease_tp() -> (u64, Vec<u8>) {
+    // Known parameter IDs to avoid colliding with
+    const KNOWN_IDS: &[u64] = &[
+        0x0000,
+        0x0001,
+        0x0002,
+        0x0003,
+        0x0004,
+        0x0005,
+        0x0006,
+        0x0007,
+        0x0008,
+        0x0009,
+        0x000a,
+        0x000b,
+        0x000c,
+        0x000d,
+        0x000e,
+        0x000f,
+        0x0010,
+        0x0011,
+        0x0020,
+        0x4752,
+        0x3127,
+        0xbaad,
+        0x0f739bbc1b666d05,
+    ];
+
+    // Generate GREASE TP id of the form 31*n + 27 (common GREASE pattern in QUIC codepoints)
+    // within the 62-bit varint space.
+    let mut rid;
+    loop {
+        let n = (rand::rng().next_u64() & 0x3fff_ffff_ffff_fff0) / 31; // spread n
+        rid = n.saturating_mul(31).saturating_add(27);
+        rid &= 0x3fff_ffff_ffff_ffff; // ensure 62-bit
+        if rid > 0x20 && !KNOWN_IDS.contains(&rid) {
+            break;
+        }
+    }
+
+    // Prefer small GREASE value lengths like Chrome (0..4 bytes).
+    let len = (rand::rng().next_u32() % 5) as usize;
+    let mut val = vec![0u8; len];
+    rand::rng().fill_bytes(&mut val);
+    (rid, val)
+}
 
 /// TransportParams is a sequence of transport parameters.
 ///
@@ -121,11 +169,31 @@ pub struct TransportParams {
     /// completely trust the path between themselves.
     /// See draft-banks-quic-disable-encryption-00.
     pub disable_encryption: bool,
+
+    /// QUIC DATAGRAM extension: maximum datagram frame size supported.
+    /// See RFC 9221. A value of 0 indicates not supported.
+    pub max_datagram_frame_size: u64,
+
+    /// Version Information transport parameter (draft-ietf-quic-version-negotiation).
+    /// Contains the chosen version and a list of other supported versions.
+    pub version_information: Option<VersionInformation>,
+
+    /// Google-specific transport parameter carrying QUIC version (0x4752).
+    pub google_quic_version: Option<u32>,
+
+    /// Google-specific transport parameter for Initial RTT in microseconds (0x3127).
+    pub google_initial_rtt: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct VersionInformation {
+    pub chosen_version: u32,
+    pub other_versions: Vec<u32>,
 }
 
 impl TransportParams {
     // Decode transport parameters from the given buffer.
-    pub(crate) fn decode(mut buf: &[u8], is_server: bool) -> Result<(TransportParams, usize)> {
+    pub(crate) fn decode(mut buf: &[u8]) -> Result<(TransportParams, usize)> {
         let len = buf.len();
         let mut tp = TransportParams::default();
         let mut found_params = HashSet::new();
@@ -142,9 +210,6 @@ impl TransportParams {
             match id {
                 0x0000 => {
                     // This transport parameter is only sent by a server.
-                    if is_server {
-                        return Err(Error::TransportParameterError);
-                    }
                     tp.original_destination_connection_id = Some(ConnectionId::new(val));
                 }
 
@@ -155,9 +220,6 @@ impl TransportParams {
                 0x0002 => {
                     // This transport parameter MUST NOT be sent by a client
                     // but MAY be sent by a server.
-                    if is_server {
-                        return Err(Error::TransportParameterError);
-                    }
                     tp.stateless_reset_token = Some(u128::from_be_bytes(
                         val.read(16)?
                             .to_vec()
@@ -230,9 +292,6 @@ impl TransportParams {
 
                 0x000d => {
                     // This transport parameter is only sent by a server.
-                    if is_server {
-                        return Err(Error::TransportParameterError);
-                    }
                     tp.preferred_address = Some(PreferredAddress::from_bytes(val)?.0);
                 }
 
@@ -252,9 +311,6 @@ impl TransportParams {
 
                 0x00010 => {
                     // This transport parameter is only sent by a server.
-                    if is_server {
-                        return Err(Error::TransportParameterError);
-                    }
                     tp.retry_source_connection_id = Some(ConnectionId::new(val));
                 }
 
@@ -266,6 +322,48 @@ impl TransportParams {
                     tp.disable_encryption = true;
                 }
 
+                0x0020 => {
+                    // max_datagram_frame_size
+                    tp.max_datagram_frame_size = val.read_varint()?;
+                }
+
+                0x0011 => {
+                    // version_information: chosen_version (4 bytes) + zero or more other versions (4 bytes each)
+                    if val.len() < 8 || val.len() % 4 != 0 {
+                        return Err(Error::TransportParameterError);
+                    }
+                    let chosen = u32::from_be_bytes(
+                        val.read(4)?.try_into().map_err(|_| Error::BufferTooShort)?,
+                    );
+                    let mut others = vec![];
+                    while !val.is_empty() {
+                        let v = u32::from_be_bytes(
+                            val.read(4)?.try_into().map_err(|_| Error::BufferTooShort)?,
+                        );
+                        others.push(v);
+                    }
+                    tp.version_information = Some(VersionInformation {
+                        chosen_version: chosen,
+                        other_versions: others,
+                    });
+                }
+
+                0x4752 => {
+                    // google_quic_version: 4 bytes
+                    if val.len() != 4 {
+                        return Err(Error::TransportParameterError);
+                    }
+                    tp.google_quic_version = Some(u32::from_be_bytes(
+                        val.read(4)?.try_into().map_err(|_| Error::BufferTooShort)?,
+                    ));
+                }
+
+                0x3127 => {
+                    // google_initial_rtt: varint microseconds
+                    let irtt = val.read_varint()?;
+                    tp.google_initial_rtt = Some(u32::try_from(irtt).unwrap_or(u32::MAX));
+                }
+
                 // Ignore unknown parameters.
                 _ => (),
             }
@@ -275,136 +373,238 @@ impl TransportParams {
     }
 
     // Encode Transport parameters to the given buffer.
-    pub(crate) fn encode(
-        tp: &TransportParams,
-        is_server: bool,
-        mut buf: &mut [u8],
-    ) -> Result<usize> {
-        let len = buf.len();
+    pub(crate) fn encode(tp: &TransportParams, mut buf: &mut [u8]) -> Result<usize> {
+        let total = buf.len();
 
-        if is_server {
-            if let Some(ref odcid) = tp.original_destination_connection_id {
-                buf.write_varint(0x0000)?;
-                buf.write_varint(odcid.len() as u64)?;
-                buf.write(odcid)?;
+        // Build parameter ID list and shuffle order to mimic browser behavior.
+        const GREASE_SENTINEL: u64 = u64::MAX;
+        let mut ids = vec![
+            0x0000,             // original_destination_connection_id
+            0x0001,             // max_idle_timeout
+            0x0002,             // stateless_reset_token
+            0x0003,             // max_udp_payload_size
+            0x0004,             // initial_max_data
+            0x0005,             // initial_max_stream_data_bidi_local
+            0x0006,             // initial_max_stream_data_bidi_remote
+            0x0007,             // initial_max_stream_data_uni
+            0x0008,             // initial_max_streams_bidi
+            0x0009,             // initial_max_streams_uni
+            0x000c,             // disable_active_migration
+            0x000d,             // preferred_address
+            0x000f,             // initial_source_connection_id (always include)
+            0x0010,             // retry_source_connection_id
+            0x0011,             // version_information (12 bytes in our defaults)
+            0x0020,             // max_datagram_frame_size
+            0x4752,             // google_quic_version
+            0x3127,             // google_initial_rtt
+            0xbaad,             // disable_encryption
+            0x0f739bbc1b666d05, // enable_multipath
+            GREASE_SENTINEL,    // GREASE param (random id/value)
+        ];
+
+        // Shuffle order, but probabilistically omit some optional params to keep size small.
+        // Drop preferred_address, stateless_reset_token, retry_source_connection_id by default.
+        ids.retain(|id| !matches!(
+            *id,
+            0x0002 /* stateless_reset_token */ | 0x000d /* preferred_address */ | 0x0010 /* retry_scid */
+        ));
+        for i in (1..ids.len()).rev() {
+            let j = (rand::rng().next_u32() as usize) % (i + 1);
+            ids.swap(i, j);
+        }
+
+        for id in ids {
+            let wrote = Self::encode_one_param(id, tp, buf)?;
+            buf = &mut buf[wrote..];
+        }
+
+        Ok(total - buf.len())
+    }
+
+    fn encode_one_param(id: u64, tp: &TransportParams, mut buf: &mut [u8]) -> Result<usize> {
+        let start = buf.len();
+        match id {
+            0x0000 => {
+                if let Some(odcid) = &tp.original_destination_connection_id {
+                    buf.write_varint(0x0000)?;
+                    buf.write_varint(odcid.len() as u64)?;
+                    buf.write(odcid)?;
+                }
             }
-        };
-
-        if tp.max_idle_timeout != 0 {
-            buf.write_varint(0x0001)?;
-            buf.write_varint(codec::encode_varint_len(tp.max_idle_timeout) as u64)?;
-            buf.write_varint(tp.max_idle_timeout)?;
-        }
-
-        if is_server {
-            if let Some(ref token) = tp.stateless_reset_token {
-                buf.write_varint(0x0002)?;
-                buf.write_varint(16)?;
-                buf.write(&token.to_be_bytes())?;
+            0x0001 => {
+                if tp.max_idle_timeout != 0 {
+                    buf.write_varint(0x0001)?;
+                    buf.write_varint(codec::encode_varint_len(tp.max_idle_timeout) as u64)?;
+                    buf.write_varint(tp.max_idle_timeout)?;
+                }
             }
-        }
-
-        if tp.max_udp_payload_size != 0 {
-            buf.write_varint(0x0003)?;
-            buf.write_varint(codec::encode_varint_len(tp.max_udp_payload_size) as u64)?;
-            buf.write_varint(tp.max_udp_payload_size)?;
-        }
-
-        if tp.initial_max_data != 0 {
-            buf.write_varint(0x0004)?;
-            buf.write_varint(codec::encode_varint_len(tp.initial_max_data) as u64)?;
-            buf.write_varint(tp.initial_max_data)?;
-        }
-
-        if tp.initial_max_stream_data_bidi_local != 0 {
-            buf.write_varint(0x0005)?;
-            buf.write_varint(
-                codec::encode_varint_len(tp.initial_max_stream_data_bidi_local) as u64,
-            )?;
-            buf.write_varint(tp.initial_max_stream_data_bidi_local)?;
-        }
-
-        if tp.initial_max_stream_data_bidi_remote != 0 {
-            buf.write_varint(0x0006)?;
-            buf.write_varint(
-                codec::encode_varint_len(tp.initial_max_stream_data_bidi_remote) as u64,
-            )?;
-            buf.write_varint(tp.initial_max_stream_data_bidi_remote)?;
-        }
-
-        if tp.initial_max_stream_data_uni != 0 {
-            buf.write_varint(0x0007)?;
-            buf.write_varint(codec::encode_varint_len(tp.initial_max_stream_data_uni) as u64)?;
-            buf.write_varint(tp.initial_max_stream_data_uni)?;
-        }
-
-        if tp.initial_max_streams_bidi != 0 {
-            buf.write_varint(0x0008)?;
-            buf.write_varint(codec::encode_varint_len(tp.initial_max_streams_bidi) as u64)?;
-            buf.write_varint(tp.initial_max_streams_bidi)?;
-        }
-
-        if tp.initial_max_streams_uni != 0 {
-            buf.write_varint(0x0009)?;
-            buf.write_varint(codec::encode_varint_len(tp.initial_max_streams_uni) as u64)?;
-            buf.write_varint(tp.initial_max_streams_uni)?;
-        }
-
-        if tp.ack_delay_exponent != 0 {
-            buf.write_varint(0x000a)?;
-            buf.write_varint(codec::encode_varint_len(tp.ack_delay_exponent) as u64)?;
-            buf.write_varint(tp.ack_delay_exponent)?;
-        }
-
-        if tp.max_ack_delay != 0 {
-            buf.write_varint(0x000b)?;
-            buf.write_varint(codec::encode_varint_len(tp.max_ack_delay) as u64)?;
-            buf.write_varint(tp.max_ack_delay)?;
-        }
-
-        if tp.disable_active_migration {
-            buf.write_varint(0x000c)?;
-            buf.write_varint(0)?;
-        }
-
-        if let Some(ref preferred_address) = tp.preferred_address {
-            buf.write_varint(0x000d)?;
-            buf.write_varint(preferred_address.wire_len() as u64)?;
-            let len = preferred_address.to_bytes(buf)?;
-            buf = &mut buf[len..];
-        }
-
-        if tp.active_conn_id_limit >= 2 {
-            buf.write_varint(0x000e)?;
-            buf.write_varint(codec::encode_varint_len(tp.active_conn_id_limit) as u64)?;
-            buf.write_varint(tp.active_conn_id_limit)?;
-        }
-
-        if let Some(scid) = &tp.initial_source_connection_id {
-            buf.write_varint(0x000f)?;
-            buf.write_varint(scid.len() as u64)?;
-            buf.write(scid)?;
-        }
-
-        if is_server {
-            if let Some(scid) = &tp.retry_source_connection_id {
-                buf.write_varint(0x0010)?;
-                buf.write_varint(scid.len() as u64)?;
-                buf.write(scid)?;
+            0x0002 => {
+                if let Some(token) = tp.stateless_reset_token {
+                    buf.write_varint(0x0002)?;
+                    buf.write_varint(16)?;
+                    buf.write(&token.to_be_bytes())?;
+                }
             }
-        }
+            0x0003 => {
+                if tp.max_udp_payload_size != 0 {
+                    buf.write_varint(0x0003)?;
+                    buf.write_varint(codec::encode_varint_len(tp.max_udp_payload_size) as u64)?;
+                    buf.write_varint(tp.max_udp_payload_size)?;
+                }
+            }
+            0x0004 => {
+                if tp.initial_max_data != 0 {
+                    buf.write_varint(0x0004)?;
+                    buf.write_varint(codec::encode_varint_len(tp.initial_max_data) as u64)?;
+                    buf.write_varint(tp.initial_max_data)?;
+                }
+            }
+            0x0005 => {
+                if tp.initial_max_stream_data_bidi_local != 0 {
+                    buf.write_varint(0x0005)?;
+                    buf.write_varint(
+                        codec::encode_varint_len(tp.initial_max_stream_data_bidi_local) as u64,
+                    )?;
+                    buf.write_varint(tp.initial_max_stream_data_bidi_local)?;
+                }
+            }
+            0x0006 => {
+                if tp.initial_max_stream_data_bidi_remote != 0 {
+                    buf.write_varint(0x0006)?;
+                    buf.write_varint(codec::encode_varint_len(
+                        tp.initial_max_stream_data_bidi_remote,
+                    ) as u64)?;
+                    buf.write_varint(tp.initial_max_stream_data_bidi_remote)?;
+                }
+            }
+            0x0007 => {
+                if tp.initial_max_stream_data_uni != 0 {
+                    buf.write_varint(0x0007)?;
+                    buf.write_varint(
+                        codec::encode_varint_len(tp.initial_max_stream_data_uni) as u64
+                    )?;
+                    buf.write_varint(tp.initial_max_stream_data_uni)?;
+                }
+            }
+            0x0008 => {
+                if tp.initial_max_streams_bidi != 0 {
+                    buf.write_varint(0x0008)?;
+                    buf.write_varint(codec::encode_varint_len(tp.initial_max_streams_bidi) as u64)?;
+                    buf.write_varint(tp.initial_max_streams_bidi)?;
+                }
+            }
+            0x0009 => {
+                if tp.initial_max_streams_uni != 0 {
+                    buf.write_varint(0x0009)?;
+                    buf.write_varint(codec::encode_varint_len(tp.initial_max_streams_uni) as u64)?;
+                    buf.write_varint(tp.initial_max_streams_uni)?;
+                }
+            }
+            0x000a => {
+                if tp.ack_delay_exponent != 0 {
+                    buf.write_varint(0x000a)?;
+                    buf.write_varint(codec::encode_varint_len(tp.ack_delay_exponent) as u64)?;
+                    buf.write_varint(tp.ack_delay_exponent)?;
+                }
+            }
+            0x000c => {
+                if tp.disable_active_migration {
+                    buf.write_varint(0x000c)?;
+                    buf.write_varint(0)?;
+                }
+            }
+            0x000d => {
+                if let Some(ref preferred_address) = tp.preferred_address {
+                    buf.write_varint(0x000d)?;
+                    buf.write_varint(preferred_address.wire_len() as u64)?;
+                    let wlen = preferred_address.to_bytes(buf)?;
+                    buf = &mut buf[wlen..];
+                }
+            }
+            0x000f => {
+                // Always include, even if empty
+                buf.write_varint(0x000f)?;
+                if let Some(scid) = &tp.initial_source_connection_id {
+                    buf.write_varint(scid.len() as u64)?;
+                    buf.write(scid)?;
+                } else {
+                    buf.write_varint(0)?;
+                }
+            }
+            0x0010 => {
+                if let Some(rcid) = &tp.retry_source_connection_id {
+                    buf.write_varint(0x0010)?;
+                    buf.write_varint(rcid.len() as u64)?;
+                    buf.write(rcid)?;
+                }
+            }
+            0x0011 => {
+                if let Some(vi) = &tp.version_information {
+                    let total_len = 4 * (1 + vi.other_versions.len());
 
-        if tp.enable_multipath {
-            buf.write_varint(0x0f739bbc1b666d05)?;
-            buf.write_varint(0)?;
-        }
+                    buf.write_varint(0x0011)?;
+                    buf.write_varint(total_len as u64)?;
+                    buf.write_u32(vi.chosen_version)?;
 
-        if tp.disable_encryption {
-            buf.write_varint(0xbaad)?;
-            buf.write_varint(0)?;
-        }
+                    let mut versions = vi.other_versions.clone();
 
-        Ok(len - buf.len())
+                    for i in (1..versions.len()).rev() {
+                        let j = (rand::rng().next_u32() as usize) % (i + 1);
+                        versions.swap(i, j);
+                    }
+
+                    for v in &versions {
+                        buf.write_u32(*v)?;
+                    }
+                }
+            }
+            0x0020 => {
+                if tp.max_datagram_frame_size != 0 {
+                    buf.write_varint(0x0020)?;
+                    buf.write_varint(codec::encode_varint_len(tp.max_datagram_frame_size) as u64)?;
+                    buf.write_varint(tp.max_datagram_frame_size)?;
+                }
+            }
+            0x4752 => {
+                if let Some(v) = tp.google_quic_version {
+                    buf.write_varint(0x4752)?;
+                    buf.write_varint(4)?;
+                    buf.write_u32(v)?;
+                }
+            }
+            0x3127 => {
+                // Always send. If not configured, randomize a plausible microseconds value.
+                let irtt_us: u32 = tp.google_initial_rtt.unwrap_or_else(|| {
+                    // 1..=500 ms → us
+                    let ms = (1 + (rand::rng().next_u32() % 500)) as u64;
+                    (ms * 1000) as u32
+                });
+                buf.write_varint(0x3127)?;
+                let irtt64 = irtt_us as u64;
+                buf.write_varint(codec::encode_varint_len(irtt64) as u64)?;
+                buf.write_varint(irtt64)?;
+            }
+            0xbaad => {
+                if tp.disable_encryption {
+                    buf.write_varint(0xbaad)?;
+                    buf.write_varint(0)?;
+                }
+            }
+            0x0f739bbc1b666d05 => {
+                if tp.enable_multipath {
+                    buf.write_varint(0x0f739bbc1b666d05)?;
+                    buf.write_varint(0)?;
+                }
+            }
+            u64::MAX => {
+                let (grease_id, grease_val) = generate_grease_tp();
+                buf.write_varint(grease_id)?;
+                buf.write_varint(grease_val.len() as u64)?;
+                buf.write(&grease_val)?;
+            }
+            _ => {}
+        }
+        Ok(start - buf.len())
     }
 
     /// Create TransportParametersSet event data for Qlog.
@@ -438,7 +638,11 @@ impl TransportParams {
             initial_max_streams_bidi: Some(self.initial_max_streams_bidi),
             initial_max_streams_uni: Some(self.initial_max_streams_uni),
             preferred_address: None,
-            max_datagram_frame_size: None,
+            max_datagram_frame_size: if self.max_datagram_frame_size != 0 {
+                Some(self.max_datagram_frame_size)
+            } else {
+                None
+            },
             grease_quic_bit: None,
         }
     }
@@ -483,6 +687,10 @@ impl Default for TransportParams {
 
             enable_multipath: false,
             disable_encryption: false,
+            max_datagram_frame_size: 0,
+            version_information: None,
+            google_quic_version: None,
+            google_initial_rtt: None,
         }
     }
 }
@@ -583,14 +791,18 @@ mod tests {
             retry_source_connection_id: None,
             enable_multipath: true,
             disable_encryption: false,
+            max_datagram_frame_size: 0,
+            version_information: None,
+            google_quic_version: None,
+            google_initial_rtt: None,
         };
 
         // encode on the client side
         let mut raw_params = [0; 256];
-        let len = TransportParams::encode(&tp, false, &mut raw_params)?;
+        let len = TransportParams::encode(&tp, &mut raw_params)?;
 
         // decode on the server side
-        let (tp2, len2) = TransportParams::decode(&raw_params[..len], true)?;
+        let (tp2, len2) = TransportParams::decode(&raw_params[..len])?;
         assert_eq!(tp, tp2);
         assert_eq!(len, len2);
 
@@ -627,14 +839,18 @@ mod tests {
             retry_source_connection_id: Some(ConnectionId::random()),
             enable_multipath: false,
             disable_encryption: true,
+            max_datagram_frame_size: 0,
+            version_information: None,
+            google_quic_version: None,
+            google_initial_rtt: None,
         };
 
         // encode on the server side
         let mut raw_params = [0; 512];
-        let len = TransportParams::encode(&tp, true, &mut raw_params)?;
+        let len = TransportParams::encode(&tp, &mut raw_params)?;
 
         // decode on the client side
-        let (tp2, len2) = TransportParams::decode(&raw_params[..len], false)?;
+        let (tp2, len2) = TransportParams::decode(&raw_params[..len])?;
         assert_eq!(tp, tp2);
         assert_eq!(len, len2);
 

@@ -21,9 +21,9 @@ use log::*;
 use super::CongestionController;
 use super::CongestionStats;
 use super::HystartPlusPlus;
+use crate::RecoveryConfig;
 use crate::connection::rtt::RttEstimator;
 use crate::connection::space::SentPacket;
-use crate::RecoveryConfig;
 
 /// Cubic constant C.
 ///
@@ -283,16 +283,14 @@ impl CongestionController for Cubic {
     fn on_sent(&mut self, now: Instant, packet: &mut SentPacket, bytes_in_flight: u64) {
         // Better follow cubic curve after idle period.
         // See <https://github.com/torvalds/linux/commit/30927520dbae297182990bb21d08762bcc35ce1d>.
-        if bytes_in_flight == 0 {
-            if let Some(last_sent_time) = self.last_sent_time {
-                if let Some(recovery_epoch_start) = self.recovery_epoch_start {
-                    // Shifted later in time by the amount of the idle period.
-                    self.recovery_epoch_start = Some(
-                        recovery_epoch_start
-                            + packet.time_sent.saturating_duration_since(last_sent_time),
-                    );
-                }
-            }
+        if bytes_in_flight == 0
+            && let Some(last_sent_time) = self.last_sent_time
+            && let Some(recovery_epoch_start) = self.recovery_epoch_start
+        {
+            // Shifted later in time by the amount of the idle period.
+            self.recovery_epoch_start = Some(
+                recovery_epoch_start + packet.time_sent.saturating_duration_since(last_sent_time),
+            );
         }
 
         self.last_sent_time = Some(packet.time_sent);

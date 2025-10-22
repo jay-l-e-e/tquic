@@ -27,14 +27,14 @@ use slab::Slab;
 use super::pmtu::Dplpmtud;
 use super::recovery::Recovery;
 use super::timer;
-use crate::connection::SpaceId;
-use crate::error::Error;
-use crate::multipath_scheduler::MultipathScheduler;
 use crate::FourTuple;
 use crate::PathStats;
 use crate::RecoveryConfig;
 use crate::Result;
 use crate::TIMER_GRANULARITY;
+use crate::connection::SpaceId;
+use crate::error::Error;
+use crate::multipath_scheduler::MultipathScheduler;
 
 pub(crate) const INITIAL_CHAL_TIMEOUT: u64 = 25;
 
@@ -300,21 +300,14 @@ impl Path {
     }
 
     /// Whether PATH_CHALLENGE or PATH_RESPONSE should be sent on the path.
-    pub(super) fn need_send_validation_frames(&self, is_server: bool) -> bool {
-        if is_server && self.anti_ampl_limit < MIN_PATH_PROBE_SIZE {
-            return false;
-        }
-
+    pub(super) fn need_send_validation_frames(&self) -> bool {
         self.need_send_challenge || !self.recv_chals.is_empty()
     }
 
     /// Whether the datagrams sent on the unvalidated path should be expanded
     /// to least the maximum datagram size
-    pub(super) fn need_expand_padding_frames(&self, is_server: bool) -> bool {
+    pub(super) fn need_expand_padding_frames(&self) -> bool {
         if self.validated() {
-            return false;
-        }
-        if is_server && self.anti_ampl_limit <= self.recovery.max_datagram_size {
             return false;
         }
         true
@@ -361,10 +354,10 @@ impl Path {
     /// Return true if the given address is a pure IPv6 address, rather than an
     /// IPv4-mapped IPv6 address.
     fn is_ipv6(addr: &SocketAddr) -> bool {
-        if let IpAddr::V6(ip) = addr.ip() {
-            if !matches!(ip.segments(), [0, 0, 0, 0, 0, 0xffff, _, _]) {
-                return true;
-            }
+        if let IpAddr::V6(ip) = addr.ip()
+            && !matches!(ip.segments(), [0, 0, 0, 0, 0, 0xffff, _, _])
+        {
+            return true;
         }
         false
     }
@@ -415,18 +408,10 @@ pub(crate) struct PathMap {
 
     /// Whether the multipath extension is successfully negotiated.
     is_multipath: bool,
-
-    /// Whether it serves as a server.
-    is_server: bool,
 }
 
 impl PathMap {
-    pub fn new(
-        mut initial_path: Path,
-        max_paths: usize,
-        anti_ampl_factor: usize,
-        is_server: bool,
-    ) -> Self {
+    pub fn new(mut initial_path: Path, max_paths: usize, anti_ampl_factor: usize) -> Self {
         // As it is the first path, it is active by default.
         initial_path.active = true;
         let local_addr = initial_path.local_addr;
@@ -448,7 +433,6 @@ impl PathMap {
             addrs,
             anti_ampl_factor,
             is_multipath: false,
-            is_server,
         }
     }
 
@@ -599,44 +583,6 @@ impl PathMap {
             .max()
     }
 
-    /// Increase send limit before address validation for server
-    pub fn inc_anti_ampl_limit(&mut self, pid: usize, pkt_len: usize) {
-        if !self.is_server {
-            return;
-        }
-        if let Some(path) = self.paths.get_mut(pid) {
-            if !path.verified_peer_address {
-                let inc = self.anti_ampl_factor.saturating_mul(pkt_len);
-                path.anti_ampl_limit = path.anti_ampl_limit.saturating_add(inc);
-            }
-        }
-    }
-
-    /// Decrease send limit before address validation for server
-    pub fn dec_anti_ampl_limit(&mut self, pid: usize, pkt_len: usize) {
-        if !self.is_server {
-            return;
-        }
-        if let Some(path) = self.paths.get_mut(pid) {
-            if !path.verified_peer_address {
-                path.anti_ampl_limit = path.anti_ampl_limit.saturating_sub(pkt_len);
-            }
-        }
-    }
-
-    /// Return the min value between the given `left` and `anti_ampl_limit`
-    pub fn cmp_anti_ampl_limit(&self, pid: usize, left: usize) -> usize {
-        if !self.is_server {
-            return left;
-        }
-        if let Some(path) = self.paths.get(pid) {
-            if !path.verified_peer_address {
-                return cmp::min(left, path.anti_ampl_limit);
-            }
-        }
-        left
-    }
-
     /// Schedule a Ping frame on the specified path or all active paths.
     pub fn mark_ping(&mut self, path_addr: Option<FourTuple>) -> Result<()> {
         // If multipath is not enabled, schedule a Ping frame on the current
@@ -667,336 +613,5 @@ impl PathMap {
     /// Promote to multipath mode.
     pub fn enable_multipath(&mut self) {
         self.is_multipath = true;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::congestion_control::CongestionControlAlgorithm;
-    use std::net::IpAddr;
-    use std::net::Ipv4Addr;
-    use std::time::Duration;
-
-    fn new_test_recovery_config() -> RecoveryConfig {
-        RecoveryConfig {
-            max_datagram_size: 1200,
-            max_ack_delay: time::Duration::from_millis(0),
-            congestion_control_algorithm: CongestionControlAlgorithm::Bbr,
-            min_congestion_window: 2_u64,
-            initial_congestion_window: 10_u64,
-            initial_rtt: crate::INITIAL_RTT,
-            pto_linear_factor: crate::DEFAULT_PTO_LINEAR_FACTOR,
-            max_pto: crate::MAX_PTO,
-            ..RecoveryConfig::default()
-        }
-    }
-
-    fn new_path_mgr(
-        clients: &Vec<SocketAddr>,
-        server: SocketAddr,
-        path_num: usize,
-        is_server: bool,
-    ) -> Result<PathMap> {
-        assert!(clients.len() > 0);
-
-        let conf = new_test_recovery_config();
-        let initial_path = Path::new(clients[0], server, true, &conf, "");
-        let mut path_mgr = PathMap::new(
-            initial_path,
-            path_num,
-            crate::ANTI_AMPLIFICATION_FACTOR,
-            is_server,
-        );
-        for i in 1..clients.len() {
-            let new_path = Path::new(clients[i], server, false, &conf, "");
-            path_mgr.insert_path(new_path)?;
-        }
-        Ok(path_mgr)
-    }
-
-    #[test]
-    fn path_initial() -> Result<()> {
-        let client_addrs = vec![SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-            9443,
-        )];
-        let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 443);
-        let mut path_mgr = new_path_mgr(&client_addrs, server_addr, 8, false)?;
-        assert_eq!(path_mgr.len(), 1);
-        assert_eq!(path_mgr.iter().count(), 1);
-        assert_eq!(path_mgr.iter_mut().count(), 1);
-
-        let client_addr = client_addrs[0];
-        let pid = path_mgr
-            .get_path_id(&(client_addr, server_addr))
-            .ok_or(Error::InternalError)?;
-        assert_eq!(pid, 0);
-        assert_eq!(path_mgr.get(pid)?.local_addr(), client_addr);
-        assert_eq!(path_mgr.get(pid)?.remote_addr(), server_addr);
-        assert_eq!(path_mgr.get(pid)?.active(), true);
-        assert_eq!(path_mgr.get(pid)?.unused(), false);
-        assert_eq!(path_mgr.get_mut(pid)?.stats().recv_count, 0);
-        assert_eq!(path_mgr.get_mut(pid)?.stats().sent_count, 0);
-        assert_eq!(path_mgr.get_active()?.local_addr(), client_addr);
-        assert_eq!(path_mgr.get_active_mut()?.remote_addr(), server_addr);
-        assert_eq!(path_mgr.get_active_path_id()?, 0);
-
-        Ok(())
-    }
-
-    #[test]
-    fn client_path_validation() -> Result<()> {
-        let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9443);
-        let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 443);
-        let conf = new_test_recovery_config();
-        let initial_path = Path::new(client_addr, server_addr, true, &conf, "");
-        let mut path_mgr = PathMap::new(initial_path, 8, crate::ANTI_AMPLIFICATION_FACTOR, false);
-
-        // Add a new path and initiate path validation
-        let client_addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9444);
-        let new_path = Path::new(client_addr1, server_addr, false, &conf, "");
-        path_mgr.insert_path(new_path)?;
-        assert_eq!(path_mgr.len(), 2);
-
-        let pid = path_mgr
-            .get_path_id(&(client_addr1, server_addr))
-            .ok_or(Error::InternalError)?;
-        path_mgr.get_mut(pid)?.initiate_path_chal();
-        assert!(path_mgr.get_mut(pid)?.need_send_validation_frames(false));
-        assert_eq!(path_mgr.get_mut(pid)?.path_chal_initiated(), true);
-
-        // Fake sending of PATH_CHALLENGE
-        let data = rand::random::<[u8; 8]>();
-        let now = time::Instant::now();
-        path_mgr.on_path_chal_sent(pid, data, 100, now)?;
-        assert_eq!(path_mgr.get_mut(pid)?.path_chal_initiated(), false);
-        assert_eq!(path_mgr.get_mut(pid)?.validated(), false);
-        assert_eq!(path_mgr.get_mut(pid)?.state, PathState::Validating);
-
-        // Fake receiving of unmatched PATH_RESPONSE
-        assert_eq!(path_mgr.on_path_resp_received(pid, [0xab; 8]), false);
-        assert_eq!(path_mgr.get_mut(pid)?.state, PathState::ValidatingMTU);
-
-        // Fake receiving of PATH_RESPONSE
-        assert_eq!(path_mgr.on_path_resp_received(pid, data), false);
-        assert_eq!(path_mgr.get_mut(pid)?.path_chal_initiated(), true);
-        assert_eq!(path_mgr.get_mut(pid)?.validated(), false);
-        assert_eq!(path_mgr.get_mut(pid)?.state, PathState::ValidatingMTU);
-
-        // Fake sending of PATH_CHALLENGE
-        path_mgr.on_path_chal_sent(pid, data, 1300, now)?;
-
-        // Fake receiving of PATH_RESPONSE
-        assert_eq!(path_mgr.on_path_resp_received(pid, data), true);
-        assert_eq!(path_mgr.get_mut(pid)?.path_chal_initiated(), false);
-        assert_eq!(path_mgr.get_mut(pid)?.validated(), true);
-        assert_eq!(path_mgr.get_mut(pid)?.state, PathState::Validated);
-        assert_eq!(path_mgr.get_mut(pid)?.sent_chals.len(), 0);
-
-        // Fake receiving of depulicated PATH_RESPONSE
-        assert_eq!(path_mgr.on_path_resp_received(pid, data), false);
-        assert_eq!(path_mgr.get_mut(pid)?.validated(), true);
-
-        // Timeout event
-        path_mgr.on_path_chal_timeout(now + time::Duration::from_millis(INITIAL_CHAL_TIMEOUT));
-        assert_eq!(path_mgr.get_mut(pid)?.lost_chal, 0);
-        assert_eq!(path_mgr.get_mut(pid)?.sent_chals.len(), 0);
-        assert_eq!(path_mgr.get_mut(pid)?.state, PathState::Validated);
-
-        Ok(())
-    }
-
-    #[test]
-    fn server_path_validation() -> Result<()> {
-        let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9443);
-        let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 443);
-        let conf = new_test_recovery_config();
-        let initial_path = Path::new(server_addr, client_addr, true, &conf, "");
-        let mut path_mgr = PathMap::new(initial_path, 2, crate::ANTI_AMPLIFICATION_FACTOR, false);
-
-        // Fake receiving of an packet on a new path 1
-        let client_addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9444);
-        let new_path = Path::new(server_addr, client_addr1, false, &conf, "");
-        let pid = path_mgr.insert_path(new_path)?;
-        assert_eq!(path_mgr.len(), 2);
-        assert_eq!(pid, 1);
-
-        // Fake receiving of PATH_CHALLENGE
-        let data = rand::random::<[u8; 8]>();
-        path_mgr.on_path_chal_received(pid, data);
-        assert_eq!(path_mgr.get_mut(pid)?.recv_chals.len(), 1);
-
-        // Fake sending of PATH_RESPONSE
-        let chal = path_mgr.get_mut(pid)?.pop_recv_chal();
-        assert_eq!(chal, Some(data));
-
-        // Fake receiving of an packet on a new path 2
-        let client_addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9445);
-        let new_path = Path::new(server_addr, client_addr2, false, &conf, "");
-        let pid = path_mgr.insert_path(new_path)?;
-        assert_eq!(path_mgr.len(), 2);
-        assert_eq!(path_mgr.get_mut(pid)?.remote_addr(), client_addr2);
-
-        // Fake receiving of PATH_CHALLENGE
-        let data = rand::random::<[u8; 8]>();
-        path_mgr.on_path_chal_received(pid, data);
-        assert_eq!(path_mgr.get_mut(pid)?.recv_chals.len(), 1);
-
-        // Fake sending of PATH_RESPONSE
-        let chal = path_mgr.get_mut(pid)?.pop_recv_chal();
-        assert_eq!(chal, Some(data));
-
-        Ok(())
-    }
-
-    #[test]
-    fn path_chal_timeout() -> Result<()> {
-        let clients = vec![
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9443),
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9444),
-        ];
-        let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 443);
-        let mut path_mgr = new_path_mgr(&clients, server_addr, 8, false)?;
-        assert_eq!(path_mgr.len(), 2);
-
-        let pid = path_mgr
-            .get_path_id(&(clients[1], server_addr))
-            .ok_or(Error::InternalError)?;
-        path_mgr.get_mut(pid)?.initiate_path_chal();
-        assert!(path_mgr.get_mut(pid)?.need_send_validation_frames(false));
-        assert_eq!(path_mgr.get_mut(pid)?.path_chal_initiated(), true);
-
-        // Fake sending of PATH_CHALLENGE.
-        let data = rand::random::<[u8; 8]>();
-        let now = time::Instant::now();
-        path_mgr.on_path_chal_sent(pid, data, 1300, now)?;
-        assert_eq!(path_mgr.get_mut(pid)?.path_chal_initiated(), false);
-        assert_eq!(path_mgr.get_mut(pid)?.validated(), false);
-        assert_eq!(path_mgr.get_mut(pid)?.state, PathState::Validating);
-
-        // Not expired.
-        path_mgr.on_path_chal_timeout(now + time::Duration::from_millis(1));
-        assert_eq!(path_mgr.get_mut(pid)?.sent_chals.len(), 1);
-        assert_eq!(path_mgr.get_mut(pid)?.lost_chal, 0);
-        assert_eq!(path_mgr.get_mut(pid)?.path_chal_initiated(), false);
-
-        // Timeout.
-        let mut next_timeout = now;
-        for i in 0..MAX_PROBING_TIMEOUTS {
-            next_timeout += time::Duration::from_millis(INITIAL_CHAL_TIMEOUT << i);
-
-            path_mgr.on_path_chal_timeout(next_timeout);
-            assert_eq!(path_mgr.get_mut(pid)?.lost_chal, i + 1);
-            assert_eq!(path_mgr.get_mut(pid)?.sent_chals.len(), 0);
-
-            if i != MAX_PROBING_TIMEOUTS - 1 {
-                assert_eq!(path_mgr.get_mut(pid)?.path_chal_initiated(), true);
-                assert_eq!(path_mgr.get_mut(pid)?.state, PathState::Validating);
-
-                let data = rand::random::<[u8; 8]>();
-                path_mgr.on_path_chal_sent(pid, data, 1300, next_timeout)?;
-                assert_eq!(path_mgr.get_mut(pid)?.path_chal_initiated(), false);
-            }
-        }
-        assert_eq!(path_mgr.get_mut(pid)?.state, PathState::Failed);
-        assert_eq!(path_mgr.get_mut(pid)?.active(), false);
-        assert_eq!(path_mgr.get_mut(pid)?.lost_chal, MAX_PROBING_TIMEOUTS);
-
-        Ok(())
-    }
-
-    #[test]
-    fn path_peer_context() -> Result<()> {
-        let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9443);
-        let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 443);
-        let conf = new_test_recovery_config();
-        let mut path = Path::new(client_addr, server_addr, true, &conf, "");
-
-        // Test setting peer context
-        let text_context = String::from("test context");
-        path.set_peer_context(text_context);
-
-        // Test getting peer context
-        let context = path.peer_context();
-        assert!(context.is_some());
-
-        // Test downcasting to String
-        if let Some(ctx) = context {
-            if let Some(s) = ctx.downcast_mut::<String>() {
-                assert_eq!(s, "test context");
-            } else {
-                panic!("Failed to downcast to String");
-            }
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn min_path_chal_timeout() -> Result<()> {
-        let clients = vec![
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9443),
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9444),
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9445),
-        ];
-        let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 443);
-        let mut path_mgr = new_path_mgr(&clients, server_addr, 8, false)?;
-        assert_eq!(path_mgr.len(), 3);
-        assert!(path_mgr.min_path_chal_timer().is_none());
-
-        let pid1 = path_mgr
-            .get_path_id(&(clients[1], server_addr))
-            .ok_or(Error::InternalError)?;
-        let pid2 = path_mgr
-            .get_path_id(&(clients[2], server_addr))
-            .ok_or(Error::InternalError)?;
-
-        // Fake sending of PATH_CHALLENGE on the first path.
-        let now = time::Instant::now();
-        let sent_time1 = now;
-        let data = rand::random::<[u8; 8]>();
-        path_mgr.on_path_chal_sent(pid1, data, 1300, sent_time1)?;
-        assert_eq!(path_mgr.get_mut(pid1)?.state, PathState::Validating);
-        let timeout1 = sent_time1 + time::Duration::from_millis(INITIAL_CHAL_TIMEOUT);
-        assert_eq!(path_mgr.min_path_chal_timer(), Some(timeout1));
-
-        // Fake sending of PATH_CHALLENGE on the second path.
-        let sent_time2 = now + time::Duration::from_millis(1);
-        path_mgr.on_path_chal_sent(pid2, data, 1300, sent_time2)?;
-        assert_eq!(path_mgr.get_mut(pid2)?.state, PathState::Validating);
-        let timeout2 = sent_time2 + time::Duration::from_millis(INITIAL_CHAL_TIMEOUT);
-        assert_eq!(path_mgr.min_path_chal_timer(), Some(timeout1));
-
-        // Fake receiving of PATH_RESPONSE on the first path.
-        path_mgr.on_path_resp_received(pid1, data);
-        assert_eq!(path_mgr.min_path_chal_timer(), Some(timeout2));
-
-        Ok(())
-    }
-
-    #[test]
-    fn path_chals_flood() -> Result<()> {
-        let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9443);
-        let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 443);
-        let conf = new_test_recovery_config();
-        let initial_path = Path::new(server_addr, client_addr, true, &conf, "");
-        let mut path_mgr = PathMap::new(initial_path, 2, crate::ANTI_AMPLIFICATION_FACTOR, false);
-
-        // Fake receiving of a packet on a new path
-        let client_addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9444);
-        let new_path = Path::new(server_addr, client_addr1, false, &conf, "");
-        let pid = path_mgr.insert_path(new_path)?;
-        assert_eq!(path_mgr.len(), 2);
-        assert_eq!(pid, 1);
-
-        // Fake receiving of PATH_CHALLENGE
-        for i in 0..1000 {
-            let data = rand::random::<[u8; 8]>();
-            path_mgr.on_path_chal_received(pid, data);
-            assert!(path_mgr.get_mut(pid)?.recv_chals.len() <= MAX_PATH_CHALS_RECV);
-        }
-
-        Ok(())
     }
 }

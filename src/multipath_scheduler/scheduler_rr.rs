@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::connection::path::PathMap;
-use crate::connection::space::PacketNumSpaceMap;
-use crate::connection::stream::StreamMap;
-use crate::multipath_scheduler::MultipathScheduler;
 use crate::Error;
 use crate::MultipathConfig;
 use crate::Path;
 use crate::Result;
+use crate::connection::path::PathMap;
+use crate::connection::space::PacketNumSpaceMap;
+use crate::connection::stream::StreamMap;
+use crate::multipath_scheduler::MultipathScheduler;
 
 /// RoundRobinScheduler iterates over the available paths and select the next
 /// one whose congestion window is open.

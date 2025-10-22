@@ -24,13 +24,13 @@ use libc::c_uint;
 use libc::c_void;
 use log::trace;
 
-use crate::codec::Decoder;
-use crate::tls;
-use crate::tls::boringssl::crypto;
-use crate::tls::key;
-use crate::tls::TlsSessionData;
 use crate::Error;
 use crate::Result;
+use crate::codec::Decoder;
+use crate::tls;
+use crate::tls::TlsSessionData;
+use crate::tls::boringssl::crypto;
+use crate::tls::key;
 
 #[repr(transparent)]
 struct SslMethod(c_void);
@@ -141,6 +141,22 @@ pub enum SslEarlyDataReason {
     QuicParameterMismatch = 13,
     // The application settings did not match the session.
     AlpsMismatch = 14,
+}
+
+/// Renegotiation mode for TLS clients. See BoringSSL's `ssl_renegotiate_mode_t`.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum SslRenegotiateMode {
+    /// Never allow renegotiation (default).
+    Never = 0,
+    /// Allow one renegotiation.
+    Once = 1,
+    /// Allow renegotiation freely.
+    Freely = 2,
+    /// Ignore HelloRequest messages.
+    Ignore = 3,
+    /// Require explicit renegotiation via SSL_renegotiate.
+    Explicit = 4,
 }
 
 /// Called when TLS context is being destroyed.
@@ -527,26 +543,135 @@ impl Session {
         unsafe { SSL_get_error(self.as_ptr(), ret_code) }
     }
 
-    pub fn init(&mut self, is_server: bool) -> Result<()> {
-        self.set_state(is_server);
+    pub fn init(&mut self) -> Result<()> {
+        self.set_connect_state();
+
         const TLS1_3_VERSION: u16 = 0x0304;
+        const SSL_GROUP_X25519_MLKEM768: u16 = 0x11ec;
+
         self.set_min_proto_version(TLS1_3_VERSION);
         self.set_max_proto_version(TLS1_3_VERSION);
+        self.set_renegotiate_mode(SslRenegotiateMode::Explicit);
+        self.set_shed_handshake_config(true);
+        self.set_encrypted_client_hello(true);
+        self.set_permute_extensions(true);
         self.set_quic_method()?;
         self.set_quic_early_data_context(b"quic")?;
         self.set_quiet_shutdown(true);
+        self.set_alps_use_new_codepoint(true);
+        self.set_curves("X25519MLKEM768:X25519:P-256:P-384")?;
+
+        self.set_group_ids(&[SSL_GROUP_X25519_MLKEM768, 29, 23, 24])?;
+        self.set_client_key_shares(&[SSL_GROUP_X25519_MLKEM768, 29, 23, 24])?;
+        self.add_application_settings(b"h3", &[])?;
+        self.set_sigalgs("ECDSA+SHA256:RSA-PSS+SHA256:RSA+SHA256:ECDSA+SHA384:RSA-PSS+SHA384:RSA+SHA384:RSA-PSS+SHA512:RSA+SHA512")?;
 
         Ok(())
     }
 
-    /// Set ssl to work in client or server mode.
-    pub fn set_state(&mut self, is_server: bool) {
+    pub fn set_curves(&mut self, curves: &str) -> Result<()> {
+        let cstr = ffi::CString::new(curves)
+            .map_err(|_| Error::TlsFail("curves format error".to_string()))?;
         unsafe {
-            if is_server {
-                SSL_set_accept_state(self.as_mut_ptr());
-            } else {
-                SSL_set_connect_state(self.as_mut_ptr());
+            match SSL_CTX_set1_curves_list(SSL_get_SSL_CTX(self.as_ptr()), cstr.as_ptr()) {
+                1 => Ok(()),
+                _ => Err(Error::TlsFail("SSL set curves failed".to_string())),
             }
+        }
+    }
+
+    pub fn set_sigalgs(&mut self, sigalgs: &str) -> Result<()> {
+        let cstr = ffi::CString::new(sigalgs)
+            .map_err(|_| Error::TlsFail("sigalgs format error".to_string()))?;
+        match unsafe { SSL_CTX_set1_sigalgs_list(SSL_get_SSL_CTX(self.as_ptr()), cstr.as_ptr()) } {
+            1 => Ok(()),
+            _ => Err(Error::TlsFail("SSL set sigalgs failed".to_string())),
+        }
+    }
+
+    pub fn set_alps_use_new_codepoint(&mut self, use_new: bool) {
+        unsafe {
+            SSL_set_alps_use_new_codepoint(self.as_mut_ptr(), i32::from(use_new));
+        }
+    }
+
+    pub fn set_client_key_shares(&mut self, groups: &[u16]) -> Result<()> {
+        unsafe {
+            match SSL_set1_client_key_shares(self.as_mut_ptr(), groups.as_ptr(), groups.len()) {
+                1 => Ok(()),
+                _ => Err(Error::TlsFail(
+                    "SSL set client key shares failed".to_string(),
+                )),
+            }
+        }
+    }
+
+    pub fn set_group_ids(&mut self, groups: &[u16]) -> Result<()> {
+        unsafe {
+            match SSL_set1_group_ids(self.as_mut_ptr(), groups.as_ptr(), groups.len()) {
+                1 => Ok(()),
+                _ => Err(Error::TlsFail("SSL set group ids failed".to_string())),
+            }
+        }
+    }
+
+    pub fn add_application_settings(&mut self, proto: &[u8], settings: &[u8]) -> Result<()> {
+        unsafe {
+            match SSL_add_application_settings(
+                self.as_mut_ptr(),
+                proto.as_ptr(),
+                proto.len(),
+                settings.as_ptr(),
+                settings.len(),
+            ) {
+                1 => Ok(()),
+                _ => Err(Error::TlsFail(
+                    "SSL add application settings failed".to_string(),
+                )),
+            }
+        }
+    }
+
+    pub fn enable_signed_cert_timestamps(&mut self) {
+        unsafe {
+            SSL_enable_signed_cert_timestamps(self.as_mut_ptr());
+        }
+    }
+
+    pub fn enable_ocsp_stapling(&mut self) {
+        unsafe {
+            SSL_enable_ocsp_stapling(self.as_mut_ptr());
+        }
+    }
+
+    pub fn set_renegotiate_mode(&mut self, mode: SslRenegotiateMode) {
+        unsafe {
+            SSL_set_renegotiate_mode(self.as_mut_ptr(), mode);
+        }
+    }
+
+    pub fn set_shed_handshake_config(&mut self, enabled: bool) {
+        unsafe {
+            SSL_set_shed_handshake_config(self.as_mut_ptr(), i32::from(enabled));
+        }
+    }
+
+    pub fn set_encrypted_client_hello(&mut self, enabled: bool) {
+        unsafe {
+            SSL_set_enable_ech_grease(self.as_mut_ptr(), i32::from(enabled));
+        }
+    }
+
+    pub fn set_permute_extensions(&mut self, enabled: bool) {
+        unsafe {
+            SSL_set_permute_extensions(self.as_mut_ptr(), i32::from(enabled));
+        }
+    }
+
+    /// Set ssl to work in client or server mode.
+    pub fn set_connect_state(&mut self) {
+        unsafe {
+            SSL_set_connect_state(self.as_mut_ptr());
         }
     }
 
@@ -856,7 +981,7 @@ impl Session {
                     return Err(Error::TlsFail(format!(
                         "early data reason format error {:?}",
                         e
-                    )))
+                    )));
                 }
             }
         };
@@ -1019,8 +1144,7 @@ extern "C" fn set_read_secret(
 
     trace!(
         "{} set read secret level {:?}",
-        session_data.trace_id,
-        level
+        session_data.trace_id, level
     );
 
     let keys = &mut session_data.key_collection[level];
@@ -1030,7 +1154,7 @@ extern "C" fn set_read_secret(
         Err(_) => return 0,
     };
 
-    if level != tls::Level::ZeroRTT || session_data.is_server {
+    if level != tls::Level::ZeroRTT {
         let secret = unsafe { slice::from_raw_parts(secret, secret_len) };
 
         let open = match crypto::Open::new_with_secret(aead, secret.to_vec()) {
@@ -1060,8 +1184,7 @@ extern "C" fn set_write_secret(
 
     trace!(
         "{} set write secret level {:?}",
-        session_data.trace_id,
-        level
+        session_data.trace_id, level
     );
 
     let keys = &mut session_data.key_collection[level];
@@ -1071,7 +1194,7 @@ extern "C" fn set_write_secret(
         Err(_) => return 0,
     };
 
-    if level != tls::Level::ZeroRTT || !session_data.is_server {
+    if level != tls::Level::ZeroRTT {
         let secret = unsafe { slice::from_raw_parts(secret, secret_len) };
 
         let seal = match crypto::Seal::new_with_secret(aead, secret.to_vec()) {
@@ -1101,9 +1224,7 @@ extern "C" fn add_handshake_data(
 
     trace!(
         "{} write message level {:?} len {}",
-        session_data.trace_id,
-        level,
-        len
+        session_data.trace_id, level, len
     );
 
     let buf = unsafe { slice::from_raw_parts(data, len) };
@@ -1134,9 +1255,7 @@ extern "C" fn send_alert(ssl: *mut Ssl, level: tls::Level, alert: u8) -> c_int {
 
     trace!(
         "{} send alert level {:?} alert {:x}",
-        session_data.trace_id,
-        level,
-        alert
+        session_data.trace_id, level, alert
     );
 
     const TLS_ALERT_ERROR: u64 = 0x100;
@@ -1267,8 +1386,7 @@ extern "C" fn select_cert(ssl: *mut Ssl, _arg: *mut c_void) -> c_int {
         if tls_config.is_none() {
             trace!(
                 "{} select cert for {} failed.",
-                session_data.trace_id,
-                server_name
+                session_data.trace_id, server_name
             );
             return 0;
         }
@@ -1493,7 +1611,7 @@ fn get_ssl_error() -> Result<String> {
     Ok(err.trim_end_matches('\0').to_string())
 }
 
-extern "C" {
+unsafe extern "C" {
     /// SSL_METHOD used for TLS connections.
     fn TLS_method() -> *const SslMethod;
 
@@ -1734,6 +1852,15 @@ extern "C" {
     /// Get the selected ALPN protocol.
     fn SSL_get0_alpn_selected(ssl: *const Ssl, out: *mut *const u8, out_len: *mut u32);
 
+    /// Add ALPS application settings for a given ALPN protocol
+    fn SSL_add_application_settings(
+        ssl: *mut Ssl,
+        proto: *const u8,
+        proto_len: usize,
+        settings: *const u8,
+        settings_len: usize,
+    ) -> c_int;
+
     /// For a server, return the hostname supplied by the client.
     fn SSL_get_servername(ssl: *const Ssl, ty: c_int) -> *const c_char;
 
@@ -1844,4 +1971,40 @@ extern "C" {
         pool: *mut CryptoBufferPool,
     ) -> *mut CryptoBuffer;
 
+    /// Set curves
+    fn SSL_CTX_set1_curves_list(ctx: *mut SslCtx, curves: *const c_char) -> c_int;
+
+    /// Set signature algorithms.
+    fn SSL_CTX_set1_sigalgs_list(ctx: *mut SslCtx, sigalgs: *const c_char) -> c_int;
+
+    /// Enable signed certificate timestamps.
+    fn SSL_enable_signed_cert_timestamps(ssl: *mut Ssl);
+
+    /// Enable OCSP stapling.
+    fn SSL_enable_ocsp_stapling(ssl: *mut Ssl);
+
+    /// Configure how a client reacts to renegotiation attempts by a server.
+    fn SSL_set_renegotiate_mode(ssl: *mut Ssl, mode: SslRenegotiateMode);
+
+    /// Shed handshake config.
+    fn SSL_set_shed_handshake_config(ssl: *mut Ssl, enable: c_int);
+
+    /// Set whether to enable ECH grease.
+    fn SSL_set_enable_ech_grease(ssl: *mut Ssl, enable: c_int);
+
+    /// Permute extensions.
+    fn SSL_set_permute_extensions(ssl: *mut Ssl, enable: c_int);
+
+    /// Enable using new ALPS codepoint (17613)
+    fn SSL_set_alps_use_new_codepoint(ssl: *mut Ssl, use_new: c_int);
+
+    /// Set explicit client key shares (TLS 1.3)
+    fn SSL_set1_client_key_shares(
+        ssl: *mut Ssl,
+        group_ids: *const u16,
+        num_group_ids: usize,
+    ) -> c_int;
+
+    /// Set supported group IDs for this SSL
+    fn SSL_set1_group_ids(ssl: *mut Ssl, group_ids: *const u16, num_group_ids: usize) -> c_int;
 }

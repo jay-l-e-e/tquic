@@ -475,7 +475,7 @@ mod tests {
 
     fn new_test_data(len: usize) -> Vec<u8> {
         let mut data = vec![0; len];
-        rand::thread_rng().fill_bytes(&mut data);
+        rand::rng().fill_bytes(&mut data);
         data
     }
 

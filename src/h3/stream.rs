@@ -15,9 +15,9 @@
 use bytes::Bytes;
 use log::*;
 
-use super::frame;
 use super::Http3Error;
 use super::Result;
+use super::frame;
 use crate::codec;
 use crate::codec::Decoder;
 use crate::codec::Encoder;
@@ -160,7 +160,7 @@ impl Http3Stream {
             // Receiving a PRIORITY_UPDATE frame on a stream other than the client control stream MUST be treated as
             // a connection error of type H3_FRAME_UNEXPECTED.
             (frame::PRIORITY_UPDATE_FRAME_REQUEST_TYPE, _) => {
-                return Err(Http3Error::FrameUnexpected)
+                return Err(Http3Error::FrameUnexpected);
             }
             (frame::PRIORITY_UPDATE_FRAME_PUSH_TYPE, _) => return Err(Http3Error::FrameUnexpected),
 

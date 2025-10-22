@@ -14,6 +14,8 @@
 
 use bytes::Bytes;
 
+use crate::ConnectionId;
+use crate::Result;
 use crate::codec;
 use crate::codec::Decoder;
 use crate::codec::Encoder;
@@ -29,8 +31,6 @@ use crate::qlog::events::QuicFrame;
 use crate::qlog::events::StreamType;
 use crate::ranges::RangeSet;
 use crate::token::ResetToken;
-use crate::ConnectionId;
-use crate::Result;
 
 /// The largest offset delivered on a stream cannot exceed 2^62-1, as it is not
 /// possible to provide flow control credit for that data.

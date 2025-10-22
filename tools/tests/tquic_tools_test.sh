@@ -30,13 +30,9 @@ LOG_LEVEL="debug"
 CLI_OPTIONS=""
 SRV_OPTIONS=""
 EXIT_CODE=0
-server_pid=""
 
 cleanup() {
     set +e
-    if [ -n "$server_pid" ]; then
-        kill $server_pid 2>/dev/null
-    fi
     pkill -P $TEST_PID # Clean up any other stray processes
     echo "exit with" $EXIT_CODE
     exit $EXIT_CODE
@@ -44,7 +40,7 @@ cleanup() {
 
 show_help() {
     echo "Usage: $0 [options]"
-    echo "  -b, Set the directory of tquic_client/tquic_server."
+    echo "  -b, Set the directory of tquic_client."
     echo "  -w, Set the workring directory for testing."
     echo "  -l, List all supported test cases."
     echo "  -t, Run the specified test cases."
@@ -52,7 +48,6 @@ show_help() {
     echo "  -p, Path number for test cases, eg. 4"
     echo "  -g, Log level, eg. debug"
     echo "  -c, Extra tquic_client options, eg. ~~cid-len 10"
-    echo "  -s, Extra tquic_server options, eg. ~~cid-len 10"
     echo "  -h, Display this help and exit."
 }
 
@@ -105,8 +100,8 @@ done
 # Ensure that all child processes have exited.
 trap 'cleanup' EXIT
 
-if [[ ! -f "$BIN_DIR/tquic_client" || ! -f "$BIN_DIR/tquic_server" ]]; then
-    echo "Not found tquic_client/tquic_server. Please specify the directory for them by '-b' option."
+if [[ ! -f "$BIN_DIR/tquic_client" ]]; then
+    echo "Not found tquic_client. Please specify the directory for them by '-b' option."
     show_help
     exit
 fi
@@ -141,13 +136,6 @@ test_multipath() {
     generate_cert $test_dir
     generate_files $test_dir
 
-    # start tquic server
-    RUST_BACKTRACE=1 $BIN_DIR/tquic_server -l 127.0.8.8:8443 --enable-multipath --multipath-algor $algor \
-        --cert $cert_dir/cert.crt --key $cert_dir/cert.key --root $data_dir \
-        --active-cid-limit $CID_LIMIT --log-file $test_dir/server.log --log-level $LOG_LEVEL \
-        $SRV_OPTIONS &
-    server_pid=$!
-
     # start tquic client
     mkdir -p $dump_dir
     local_addresses=`seq -s, -f "127.0.0.%g" 1 $PATH_NUM`
@@ -172,9 +160,6 @@ test_multipath() {
         exit $EXIT_CODE
     fi
 
-    # clean up
-    kill $server_pid
-    server_pid=""
     echo -e "Test $algor OK\n"
 }
 
@@ -239,43 +224,6 @@ run_range_test_case() {
     echo "    [OK] $test_name"
 }
 
-test_range_request() {
-    local test_dir=$1
-    echo "[-] Running comprehensive range request tests"
-
-    # prepare environment
-    local cert_dir="$test_dir/cert"
-    local data_dir="$test_dir/data"
-    local dump_dir="$test_dir/dump"
-    mkdir -p $dump_dir
-
-    generate_cert $test_dir
-    generate_files $test_dir
-    local original_file="$data_dir/$TEST_FILE"
-    local file_size=$(stat -c%s "$original_file")
-
-    # start tquic server
-    RUST_BACKTRACE=1 $BIN_DIR/tquic_server -l 127.0.8.8:8443         --cert $cert_dir/cert.crt --key $cert_dir/cert.key --root $data_dir         --log-file $test_dir/server.log --log-level $LOG_LEVEL         $SRV_OPTIONS &
-    server_pid=$!
-    sleep 1 # Wait for server to be ready
-
-    # --- Run all test cases ---
-    run_range_test_case "middle_segment"      "100-199"         206 100    "$original_file" "$dump_dir" "$test_dir"
-    run_range_test_case "from_start"          "0-99"            206 100    "$original_file" "$dump_dir" "$test_dir"
-    run_range_test_case "to_end_open"         "$(($file_size-100))-" 206 100    "$original_file" "$dump_dir" "$test_dir"
-    run_range_test_case "suffix_range"        "-100"            206 100    "$original_file" "$dump_dir" "$test_dir"
-    run_range_test_case "single_byte"         "50-50"           206 1      "$original_file" "$dump_dir" "$test_dir"
-    run_range_test_case "entire_file"         "0-$(($file_size-1))" 206 $file_size "$original_file" "$dump_dir" "$test_dir"
-    run_range_test_case "start_out_of_bounds" "$file_size-"     416 0      "$original_file" "$dump_dir" "$test_dir"
-    run_range_test_case "start_gt_end"        "200-100"         416 0      "$original_file" "$dump_dir" "$test_dir"
-    run_range_test_case "multipart_range"     "0-99,200-299"    200 $file_size "$original_file" "$dump_dir" "$test_dir"
-
-    # --- Cleanup ---
-    kill $server_pid
-    server_pid=""
-    echo -e "Test range_request OK\n"
-}
-
 for TEST_CASE in ${TEST_CASES//,/ }; do
     case $TEST_CASE in
         multipath_minrtt)
@@ -286,9 +234,6 @@ for TEST_CASE in ${TEST_CASES//,/ }; do
             ;;
         multipath_roundrobin)
             test_multipath "$TEST_DIR/roundrobin" roundrobin
-            ;;
-        range_request)
-            test_range_request "$TEST_DIR/range"
             ;;
         *)
             echo "[x] Unknown test case $TEST_CASE"

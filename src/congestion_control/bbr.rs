@@ -33,9 +33,9 @@ use rand::Rng;
 use super::delivery_rate::DeliveryRateEstimator;
 use super::minmax::MinMax;
 use super::{CongestionController, CongestionStats};
+use crate::RecoveryConfig;
 use crate::connection::rtt::RttEstimator;
 use crate::connection::space::{RateSamplePacketState, SentPacket};
-use crate::RecoveryConfig;
 
 /// BBR configurable parameters.
 #[derive(Debug)]
@@ -586,7 +586,7 @@ impl Bbr {
         // BBR flows share a bottleneck, BBR randomizes the phases of ProbeBW
         // gain cycling by randomly picking an initial phase, from among all but
         // the 3/4 phase, when entering ProbeBW.
-        self.cycle_index = GAIN_CYCLE_LEN - 1 - rand::thread_rng().gen_range(0..GAIN_CYCLE_LEN - 1);
+        self.cycle_index = GAIN_CYCLE_LEN - 1 - rand::rng().random_range(0..GAIN_CYCLE_LEN - 1);
         self.advance_cycle_phase(now);
     }
 

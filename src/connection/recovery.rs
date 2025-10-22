@@ -21,6 +21,8 @@ use std::time::Instant;
 
 use log::*;
 
+use super::Connection;
+use super::HandshakeStatus;
 use super::rtt::RttEstimator;
 use super::space::AckedPacket;
 use super::space::PacketNumSpace;
@@ -28,8 +30,11 @@ use super::space::PacketNumSpaceMap;
 use super::space::SentPacket;
 use super::space::SpaceId;
 use super::space::SpaceId::*;
-use super::Connection;
-use super::HandshakeStatus;
+use crate::Error;
+use crate::PathStats;
+use crate::RecoveryConfig;
+use crate::Result;
+use crate::TIMER_GRANULARITY;
 use crate::congestion_control;
 use crate::congestion_control::CongestionController;
 use crate::congestion_control::Pacer;
@@ -40,11 +45,6 @@ use crate::qlog;
 #[cfg(feature = "qlog")]
 use crate::qlog::events::EventData;
 use crate::ranges::RangeSet;
-use crate::Error;
-use crate::PathStats;
-use crate::RecoveryConfig;
-use crate::Result;
-use crate::TIMER_GRANULARITY;
 
 const INITIAL_PACKET_THRESHOLD: u64 = 3;
 
@@ -502,25 +502,26 @@ impl Recovery {
         }
 
         // Notify congestion controller of the lost event
-        if let Some(lost_packet) = latest_lost_packet {
-            if space.id != SpaceId::Initial && space.id != SpaceId::Handshake {
-                self.congestion.on_congestion_event(
-                    now,
-                    &lost_packet,
-                    self.in_persistent_congestion(),
-                    lost_bytes,
-                    self.bytes_in_flight as u64,
-                );
-                trace!(
-                    "now={:?} {} {} ON_CONGESTION_EVENT lost_size={} inflight={} cwnd={}",
-                    now,
-                    self.trace_id,
-                    self.congestion.name(),
-                    lost_bytes,
-                    self.bytes_in_flight,
-                    self.congestion.congestion_window()
-                );
-            }
+        if let Some(lost_packet) = latest_lost_packet
+            && space.id != SpaceId::Initial
+            && space.id != SpaceId::Handshake
+        {
+            self.congestion.on_congestion_event(
+                now,
+                &lost_packet,
+                self.in_persistent_congestion(),
+                lost_bytes,
+                self.bytes_in_flight as u64,
+            );
+            trace!(
+                "now={:?} {} {} ON_CONGESTION_EVENT lost_size={} inflight={} cwnd={}",
+                now,
+                self.trace_id,
+                self.congestion.name(),
+                lost_bytes,
+                self.bytes_in_flight,
+                self.congestion.congestion_window()
+            );
         }
 
         self.stat_lost_event(lost_packets, lost_bytes);
@@ -539,11 +540,11 @@ impl Recovery {
                 lowest_non_expired_pkt_index = i;
                 break;
             }
-            if let Some(time_lost) = pkt.time_lost {
-                if time_lost + rtt > now {
-                    lowest_non_expired_pkt_index = i;
-                    break;
-                }
+            if let Some(time_lost) = pkt.time_lost
+                && time_lost + rtt > now
+            {
+                lowest_non_expired_pkt_index = i;
+                break;
             }
         }
         space.sent.drain(..lowest_non_expired_pkt_index);

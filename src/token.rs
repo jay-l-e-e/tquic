@@ -22,12 +22,12 @@ use ring::aead;
 use ring::hmac;
 
 use self::AddressTokenType::*;
+use crate::ConnectionId;
+use crate::RESET_TOKEN_LEN;
+use crate::Result;
 use crate::codec::Decoder;
 use crate::codec::Encoder;
 use crate::error::Error;
-use crate::ConnectionId;
-use crate::Result;
-use crate::RESET_TOKEN_LEN;
 
 /// Type of token for address validation.
 #[derive(Clone, Copy, Debug, PartialEq)]

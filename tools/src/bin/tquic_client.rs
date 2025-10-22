@@ -15,28 +15,27 @@
 use std::cell::RefCell;
 use std::cell::RefMut;
 use std::cmp::max;
-use std::fs::create_dir_all;
 use std::fs::File;
+use std::fs::create_dir_all;
 use std::io::BufWriter;
 use std::io::Write;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::net::SocketAddr;
-use std::net::ToSocketAddrs;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Instant;
 
 use bytes::Bytes;
-use clap::error::ErrorKind;
 use clap::CommandFactory;
 use clap::Parser;
+use clap::error::ErrorKind;
 use log::debug;
 use log::error;
 use log::info;
@@ -49,27 +48,28 @@ use statrs::statistics::Distribution;
 use statrs::statistics::Max;
 use statrs::statistics::Min;
 use statrs::statistics::OrderStatistics;
-use tquic::h3::NameValue;
+use tquic_mimic_chromium_client::h3::NameValue;
 use url::Url;
 
-use tquic::connection::ConnectionStats;
-use tquic::error::Error;
-use tquic::h3::connection::Http3Connection;
-use tquic::h3::Header;
-use tquic::h3::Http3Config;
-use tquic::CertCompressionAlgorithm;
-use tquic::Config;
-use tquic::CongestionControlAlgorithm;
-use tquic::Connection;
-use tquic::Endpoint;
-use tquic::MultipathAlgorithm;
-use tquic::PacketInfo;
-use tquic::TlsConfig;
-use tquic::TransportHandler;
+use tquic_mimic_chromium_client::CertCompressionAlgorithm;
+use tquic_mimic_chromium_client::Config;
+use tquic_mimic_chromium_client::CongestionControlAlgorithm;
+use tquic_mimic_chromium_client::Connection;
+use tquic_mimic_chromium_client::Endpoint;
+use tquic_mimic_chromium_client::MultipathAlgorithm;
+use tquic_mimic_chromium_client::PacketInfo;
+use tquic_mimic_chromium_client::TlsConfig;
+use tquic_mimic_chromium_client::TransportHandler;
+use tquic_mimic_chromium_client::connection::ConnectionStats;
+use tquic_mimic_chromium_client::error::Error;
+use tquic_mimic_chromium_client::h3::Header;
+use tquic_mimic_chromium_client::h3::Http3Config;
+use tquic_mimic_chromium_client::h3::connection::Http3Connection;
 use tquic_tools::ApplicationProto;
 use tquic_tools::CertCompressionAlgorithmArg;
 use tquic_tools::QuicSocket;
 use tquic_tools::Result;
+use tquic_tools::decode_http_body_to_string;
 
 #[cfg(unix)]
 #[global_allocator]
@@ -112,7 +112,7 @@ pub struct ClientOpt {
     /// Number of concurrent requests per connection.
     #[clap(
         long,
-        default_value = "1",
+        default_value = "100",
         value_name = "NUM",
         help_heading = "Concurrency"
     )]
@@ -153,7 +153,7 @@ pub struct ClientOpt {
         short,
         long,
         value_delimiter = ',',
-        default_value = "h3,http/0.9,hq-interop",
+        default_value = "h3",
         value_name = "STR",
         help_heading = "Protocol"
     )]
@@ -164,11 +164,16 @@ pub struct ClientOpt {
     pub session_file: Option<String>,
 
     /// Enable early data.
-    #[clap(short, long, help_heading = "Protocol")]
+    #[clap(short, default_value = "true", long, help_heading = "Protocol")]
     pub enable_early_data: bool,
 
     /// Enable certificate compression.
-    #[clap(long, value_name = "STR", help_heading = "Protocol")]
+    #[clap(
+        long,
+        value_name = "STR",
+        default_value = "brotli",
+        help_heading = "Protocol"
+    )]
     pub certificate_compression: Vec<CertCompressionAlgorithmArg>,
 
     /// Disable stateless reset.
@@ -217,7 +222,7 @@ pub struct ClientOpt {
     /// Set max_udp_payload_size transport parameter.
     #[clap(
         long,
-        default_value = "65527",
+        default_value = "1472",
         value_name = "NUM",
         help_heading = "Protocol"
     )]
@@ -226,7 +231,7 @@ pub struct ClientOpt {
     /// Set the maximum outgoing UDP payload size.
     #[clap(
         long,
-        default_value = "1200",
+        default_value = "1250",
         value_name = "NUM",
         help_heading = "Protocol"
     )]
@@ -296,13 +301,9 @@ pub struct ClientOpt {
     pub dump_dir: Option<String>,
 
     /// Log level, support OFF/ERROR/WARN/INFO/DEBUG/TRACE.
-    #[clap(
-        long,
-        default_value = "INFO",
-        value_name = "STR",
-        help_heading = "Output"
-    )]
-    pub log_level: log::LevelFilter,
+    /// Defaults to DEBUG in debug builds, INFO in release builds.
+    #[clap(long, value_name = "STR", help_heading = "Output")]
+    pub log_level: Option<log::LevelFilter>,
 
     /// Log file path. If no file is specified, logs will be written to `stderr`.
     #[clap(long, value_name = "FILE", help_heading = "Output")]
@@ -620,7 +621,7 @@ impl Worker {
 
         Ok(Worker {
             option,
-            endpoint: Endpoint::new(Box::new(config), false, Box::new(handlers), sock.clone()),
+            endpoint: Endpoint::new(Box::new(config), Box::new(handlers), sock.clone()),
             poll,
             remote,
             sock,
@@ -876,6 +877,8 @@ struct Request {
     headers: Vec<Header>, // Used in h3.
     response_writer: Option<std::io::BufWriter<std::fs::File>>,
     start_time: Option<Instant>,
+    response_content_encoding: Option<Vec<u8>>,
+    response_buffer: Vec<u8>,
 }
 
 impl Request {
@@ -925,30 +928,53 @@ impl Request {
         };
 
         let mut headers = vec![
-            tquic::h3::Header::new(b":method", method.as_bytes()),
-            tquic::h3::Header::new(b":scheme", url.scheme().as_bytes()),
-            tquic::h3::Header::new(b":authority", authority.as_bytes()),
-            tquic::h3::Header::new(b":path", url[url::Position::BeforePath..].as_bytes()),
-            tquic::h3::Header::new(b"user-agent", b"tquic"),
+            Header::new(b":authority", authority.as_bytes()),
+            Header::new(b":method", method.as_bytes()),
+            Header::new(b":path", url[url::Position::BeforePath..].as_bytes()),
+            Header::new(b":scheme", url.scheme().as_bytes()),
+            Header::new(b"accept", b"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"),
+            Header::new(b"accept-encoding", b"gzip, deflate, br, zstd"),
+            Header::new(b"accept-language", b"ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"),
+            Header::new(b"cache-control", b"no-cache"),
+            Header::new(b"pragma", b"no-cache"),
+            Header::new(b"priority", b"u=0, i"),
+            Header::new(b"sec-ch-ua", b"\"Google Chrome\";v=\"141\", \"Not?A_Brand\";v=\"8\", \"Chromium\";v=\"141\""),
+            Header::new(b"sec-ch-ua-arch", b"\"x86\""),
+            Header::new(b"sec-ch-ua-bitness", b"\"64\""),
+            Header::new(b"sec-ch-ua-full-version", b"\"141.0.7390.108\""),
+            Header::new(b"sec-ch-ua-full-version-list", b"Google Chrome;v=\"141.0.7390.108\", Not?A_Brand;v=\"8.0.0.0\", Chromium;v=\"141.0.7390.108\""),
+            Header::new(b"sec-ch-ua-mobile", b"?0"),
+            Header::new(b"sec-ch-ua-model", b"\"\""),
+            Header::new(b"sec-ch-ua-platform", b"\"Windows\""),
+            Header::new(b"sec-ch-ua-platform-version", b"\"19.0.0\""),
+            Header::new(b"sec-fetch-dest", b"document"),
+            Header::new(b"sec-fetch-mode", b"navigate"),
+            Header::new(b"sec-fetch-site", b"same-origin"),
+            Header::new(b"sec-fetch-user", b"?1"),
+            Header::new(b"upgrade-insecure-requests", b"1"),
+            Header::new(b"user-agent", b"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"),
         ];
         if let Some(range_val) = range {
-            headers.push(tquic::h3::Header::new(
+            headers.push(Header::new(
                 b"range",
                 format!("bytes={}", range_val).as_bytes(),
             ));
         }
         if body.is_some() {
-            headers.push(tquic::h3::Header::new(
+            headers.push(Header::new(
                 b"content-length",
                 body.as_ref().unwrap().len().to_string().as_bytes(),
             ));
         }
+
         Self {
             url: url.clone(),
             line: format!("GET {}\r\n", url.path()),
             headers,
             response_writer: Self::make_response_writer(url, dump_dir),
             start_time: None,
+            response_content_encoding: None,
+            response_buffer: Vec::new(),
         }
     }
 }
@@ -1098,7 +1124,7 @@ impl RequestSender {
             true,
         ) {
             Ok(v) => v,
-            Err(tquic::error::Error::StreamLimitError) => {
+            Err(tquic_mimic_chromium_client::error::Error::StreamLimitError) => {
                 return Err("stream limit reached".to_string().into());
             }
             Err(e) => {
@@ -1114,7 +1140,9 @@ impl RequestSender {
     fn send_h3_request(&mut self, conn: &mut Connection, request: &Request) -> Result<u64> {
         let s = match self.h3_conn.as_mut().unwrap().stream_new(conn) {
             Ok(v) => v,
-            Err(tquic::h3::Http3Error::TransportError(Error::StreamLimitError)) => {
+            Err(tquic_mimic_chromium_client::h3::Http3Error::TransportError(
+                Error::StreamLimitError,
+            )) => {
                 return Err("stream limit reached".to_string().into());
             }
             Err(e) => {
@@ -1131,7 +1159,7 @@ impl RequestSender {
             .send_headers(conn, s, &request.headers, true)
         {
             Ok(v) => v,
-            Err(tquic::h3::Http3Error::StreamBlocked) => {
+            Err(tquic_mimic_chromium_client::h3::Http3Error::StreamBlocked) => {
                 return Err("stream is blocked".to_string().into());
             }
             Err(e) => {
@@ -1154,11 +1182,11 @@ impl RequestSender {
                 return;
             }
 
-            if rand::thread_rng().gen_range(0..=1) == 0 {
+            if rand::rng().random_range(0..=1) == 0 {
                 return;
             }
 
-            let n = rand::thread_rng().gen_range(0..worker_ctx.request_time_samples.len());
+            let n = rand::rng().random_range(0..worker_ctx.request_time_samples.len());
             worker_ctx.request_time_samples[n] = request_time.as_micros() as f64;
         }
     }
@@ -1171,12 +1199,6 @@ impl RequestSender {
                 continue;
             }
             println!("{}: {}", k.unwrap(), v.unwrap());
-        }
-    }
-
-    fn print_body(buf: &[u8]) {
-        if let Ok(data) = String::from_utf8(buf.to_vec()) {
-            print!("{}", data);
         }
     }
 
@@ -1198,9 +1220,8 @@ impl RequestSender {
             if let Some(writer) = &mut request.response_writer {
                 _ = writer.write_all(&self.buf[..read]);
             }
-            if self.option.print_res {
-                Self::print_body(&self.buf[..read]);
-            }
+            // Accumulate; decode/print on FIN to avoid splitting compressed streams
+            request.response_buffer.extend_from_slice(&self.buf[..read]);
 
             if stream_id % 4 == 0 && fin {
                 debug!(
@@ -1225,7 +1246,10 @@ impl RequestSender {
         let h3_conn = self.h3_conn.as_mut().unwrap();
         loop {
             match h3_conn.poll(conn) {
-                Ok((stream_id, tquic::h3::Http3Event::Headers { headers, .. })) => {
+                Ok((
+                    stream_id,
+                    tquic_mimic_chromium_client::h3::Http3Event::Headers { headers, .. },
+                )) => {
                     debug!(
                         "{} got response headers {:?} on stream id {}",
                         conn.trace_id(),
@@ -1235,8 +1259,17 @@ impl RequestSender {
                     if self.option.print_res {
                         Self::print_headers(&headers);
                     }
+                    // Cache content-encoding for this stream
+                    if let Some(req) = self.streams.get_mut(&stream_id) {
+                        if let Some(h) = headers
+                            .iter()
+                            .find(|h| h.name().eq_ignore_ascii_case(b"content-encoding"))
+                        {
+                            req.response_content_encoding = Some(h.value().to_vec());
+                        }
+                    }
                 }
-                Ok((stream_id, tquic::h3::Http3Event::Data)) => {
+                Ok((stream_id, tquic_mimic_chromium_client::h3::Http3Event::Data)) => {
                     while let Ok(read) = h3_conn.recv_body(conn, stream_id, &mut self.buf) {
                         debug!(
                             "{} got {} bytes of response data on stream {}",
@@ -1249,12 +1282,12 @@ impl RequestSender {
                         if let Some(writer) = &mut request.response_writer {
                             _ = writer.write_all(&self.buf[..read]);
                         }
-                        if self.option.print_res {
-                            Self::print_body(&self.buf[..read]);
+                        if let Some(req) = self.streams.get_mut(&stream_id) {
+                            req.response_buffer.extend_from_slice(&self.buf[..read]);
                         }
                     }
                 }
-                Ok((stream_id, tquic::h3::Http3Event::Finished)) => {
+                Ok((stream_id, tquic_mimic_chromium_client::h3::Http3Event::Finished)) => {
                     debug!(
                         "{} done requests {}, total {}",
                         conn.trace_id(),
@@ -1267,10 +1300,17 @@ impl RequestSender {
                     worker_ctx.request_success += 1;
                     worker_ctx.request_done += 1;
                     let request = self.streams.get_mut(&stream_id).unwrap();
+
+                    if self.option.print_res {
+                        let enc = request.response_content_encoding.as_deref();
+                        let s = decode_http_body_to_string(&request.response_buffer, enc);
+                        print!("{}", &s[..100]);
+                    }
+
                     Self::sample_request_time(request, &mut worker_ctx);
                     self.streams.remove(&stream_id);
                 }
-                Ok((stream_id, tquic::h3::Http3Event::Reset(e))) => {
+                Ok((stream_id, tquic_mimic_chromium_client::h3::Http3Event::Reset(e))) => {
                     error!(
                         "{} request was reset by peer with {}, close connection, done requests {}, total {}",
                         conn.trace_id(),
@@ -1291,17 +1331,20 @@ impl RequestSender {
                     }
                     return;
                 }
-                Ok((prioritized_element_id, tquic::h3::Http3Event::PriorityUpdate)) => {
+                Ok((
+                    prioritized_element_id,
+                    tquic_mimic_chromium_client::h3::Http3Event::PriorityUpdate,
+                )) => {
                     debug!(
                         "{} PRIORITY_UPDATE triggered for element ID={}",
                         conn.trace_id(),
                         prioritized_element_id
                     );
                 }
-                Ok((goaway_id, tquic::h3::Http3Event::GoAway)) => {
+                Ok((goaway_id, tquic_mimic_chromium_client::h3::Http3Event::GoAway)) => {
                     debug!("{} got GOAWAY with ID {} ", conn.trace_id(), goaway_id);
                 }
-                Err(tquic::h3::Http3Error::Done) => {
+                Err(tquic_mimic_chromium_client::h3::Http3Error::Done) => {
                     return;
                 }
                 Err(e) => {
@@ -1545,7 +1588,11 @@ impl TransportHandler for WorkerHandler {
 
 fn process_connect_address(option: &mut ClientOpt) {
     if option.connect_to.is_none() {
-        option.connect_to = option.urls[0].to_socket_addrs().unwrap().next();
+        option.connect_to = option.urls[0]
+            .socket_addrs(|| None)
+            .unwrap()
+            .first()
+            .copied();
     }
 
     let remote = option.connect_to.as_mut().unwrap();
@@ -1579,9 +1626,17 @@ fn parse_option() -> std::result::Result<ClientOpt, clap::error::Error> {
 }
 
 fn process_option(option: &mut ClientOpt) -> Result<()> {
+    let level = option.log_level.unwrap_or_else(|| {
+        if cfg!(debug_assertions) {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Info
+        }
+    });
+
     env_logger::builder()
         .target(tquic_tools::log_target(&option.log_file)?)
-        .filter_level(option.log_level)
+        .filter_level(level)
         .format_timestamp_millis()
         .init();
 
