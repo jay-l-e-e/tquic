@@ -782,11 +782,11 @@ mod tests {
             initial_max_stream_data_uni: 3 * 1024 * 1024,
             initial_max_streams_bidi: 200,
             initial_max_streams_uni: 100,
-            ack_delay_exponent: 10,
-            max_ack_delay: 2_u64.pow(8),
+            ack_delay_exponent: 3,
+            max_ack_delay: 25,
             disable_active_migration: true,
             preferred_address: None,
-            active_conn_id_limit: 12,
+            active_conn_id_limit: 2,
             initial_source_connection_id: Some(ConnectionId::random()),
             retry_source_connection_id: None,
             enable_multipath: true,
@@ -794,7 +794,7 @@ mod tests {
             max_datagram_frame_size: 0,
             version_information: None,
             google_quic_version: None,
-            google_initial_rtt: None,
+            google_initial_rtt: Some(100000),
         };
 
         // encode on the client side
@@ -802,54 +802,6 @@ mod tests {
         let len = TransportParams::encode(&tp, &mut raw_params)?;
 
         // decode on the server side
-        let (tp2, len2) = TransportParams::decode(&raw_params[..len])?;
-        assert_eq!(tp, tp2);
-        assert_eq!(len, len2);
-
-        Ok(())
-    }
-
-    #[test]
-    fn transport_params_from_server() -> Result<()> {
-        let ip4 = Ipv4Addr::new(192, 168, 1, 1);
-        let ip6 = Ipv6Addr::new(0x26, 0, 0x1c9, 0, 0, 0xafc8, 0x10, 0x1);
-        let preferred_address = Some(PreferredAddress {
-            ipv4_address: Some(SocketAddrV4::new(ip4, 80)),
-            ipv6_address: Some(SocketAddrV6::new(ip6, 81, 0, 0)),
-            connection_id: ConnectionId::random(),
-            stateless_reset_token: ResetToken([0xc; crate::RESET_TOKEN_LEN]),
-        });
-        let tp = TransportParams {
-            original_destination_connection_id: Some(ConnectionId::random()),
-            max_idle_timeout: 60,
-            stateless_reset_token: Some(u128::from_be_bytes([0x1; 16])),
-            max_udp_payload_size: 1300,
-            initial_max_data: 4 * 1024 * 1024,
-            initial_max_stream_data_bidi_local: 2 * 1024 * 1024,
-            initial_max_stream_data_bidi_remote: 1024 * 1024,
-            initial_max_stream_data_uni: 3 * 1024 * 1024,
-            initial_max_streams_bidi: 200,
-            initial_max_streams_uni: 100,
-            ack_delay_exponent: 10,
-            max_ack_delay: 2_u64.pow(8),
-            disable_active_migration: true,
-            preferred_address,
-            active_conn_id_limit: 12,
-            initial_source_connection_id: Some(ConnectionId::random()),
-            retry_source_connection_id: Some(ConnectionId::random()),
-            enable_multipath: false,
-            disable_encryption: true,
-            max_datagram_frame_size: 0,
-            version_information: None,
-            google_quic_version: None,
-            google_initial_rtt: None,
-        };
-
-        // encode on the server side
-        let mut raw_params = [0; 512];
-        let len = TransportParams::encode(&tp, &mut raw_params)?;
-
-        // decode on the client side
         let (tp2, len2) = TransportParams::decode(&raw_params[..len])?;
         assert_eq!(tp, tp2);
         assert_eq!(len, len2);

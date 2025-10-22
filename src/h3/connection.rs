@@ -1503,7 +1503,7 @@ impl Http3Connection {
             }
 
             Http3StreamType::Unknown(type_id) => {
-                error!(
+                debug!(
                     "{:?} received unknown type {} stream {}",
                     conn.trace_id(),
                     type_id,

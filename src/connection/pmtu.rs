@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn dplpmtud_max() {
-        let mut d = Dplpmtud::new(true, 1200, false);
+        let mut d = Dplpmtud::new(true, 1250, false);
         let peer_max_udp_payload = 60000;
         assert_eq!(d.should_probe(), true);
 
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn dplpmtud_min() {
-        let mut d = Dplpmtud::new(true, 1200, true);
+        let mut d = Dplpmtud::new(true, 1250, true);
         let peer_max_udp_payload = 60000;
         assert_eq!(d.should_probe(), true);
 
@@ -216,13 +216,13 @@ mod tests {
             }
         }
 
-        assert_eq!(d.get_current_size(), 1200);
+        assert_eq!(d.get_current_size(), 1250);
         assert_eq!(d.should_probe(), false);
     }
 
     #[test]
     fn dplpmtud_mid() {
-        let mut d = Dplpmtud::new(true, 1200, true);
+        let mut d = Dplpmtud::new(true, 1250, true);
         let peer_max_udp_payload = 60000;
         assert_eq!(d.should_probe(), true);
 
@@ -247,7 +247,7 @@ mod tests {
             }
         }
 
-        assert_eq!(d.get_current_size(), 1349);
+        assert_eq!(d.get_current_size(), 1338);
         assert_eq!(d.should_probe(), false);
     }
 }

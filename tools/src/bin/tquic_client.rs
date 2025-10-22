@@ -932,7 +932,7 @@ impl Request {
             Header::new(b":method", method.as_bytes()),
             Header::new(b":path", url[url::Position::BeforePath..].as_bytes()),
             Header::new(b":scheme", url.scheme().as_bytes()),
-            Header::new(b"accept", b"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"),
+            Header::new(b"accept", b"*/*"),
             Header::new(b"accept-encoding", b"gzip, deflate, br, zstd"),
             Header::new(b"accept-language", b"ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"),
             Header::new(b"cache-control", b"no-cache"),
