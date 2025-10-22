@@ -84,7 +84,3 @@ crate-type = ["lib", "staticlib", "cdylib"]
 
 [workspace]
 members = ["tools"]
-
-[[bench]]
-name = "timer_queue"
-harness = false

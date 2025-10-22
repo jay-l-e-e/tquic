@@ -1,4 +1,3 @@
-fuzz/
 include/
 target/
 !target/release/tquic_client

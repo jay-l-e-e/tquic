@@ -23,7 +23,7 @@
 //!   (CUBIC, BBR, COPA), and Multipath QUIC for utilizing multiple paths within
 //!   a single connection.
 //! * **High Quality**: TQUIC employs extensive testing techniques, including
-//!   unit testing, fuzz testing, integration testing, benchmarking,
+//!   unit testing, integration testing,
 //!   interoperability testing, and protocol conformance testing.
 //! * **Easy to Use**: TQUIC is easy to use, supporting flexible configuration
 //!   and detailed observability. It offers APIs for Rust/C/C++.

@@ -514,11 +514,6 @@ pub(crate) fn decrypt_payload(
     let payload_buf = &mut payload_buf[..payload_len];
     let mut plaintext = BytesMut::zeroed(payload_len);
 
-    if cfg!(feature = "fuzzing") {
-        // Not touch payload for fuzz testing
-        return Ok(Bytes::copy_from_slice(payload_buf));
-    }
-
     let payload_len = aead.open(
         cid_seq,
         pkt_num,
