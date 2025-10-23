@@ -1781,7 +1781,7 @@ dependencies = [
 
 [[package]]
 name = "tquic-mimic-chromium-client"
-version = "0.0.2"
+version = "0.0.5"
 dependencies = [
  "brotli",
  "bytes",
@@ -1820,7 +1820,7 @@ dependencies = [
 
 [[package]]
 name = "tquic_tools"
-version = "0.0.2"
+version = "0.0.5"
 dependencies = [
  "brotli",
  "bytes",
