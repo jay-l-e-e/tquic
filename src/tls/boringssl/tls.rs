@@ -23,6 +23,7 @@ use libc::c_long;
 use libc::c_uint;
 use libc::c_void;
 use log::trace;
+use boring_sys_vendit::*;
 
 use crate::Error;
 use crate::Result;
@@ -32,70 +33,15 @@ use crate::tls::TlsSessionData;
 use crate::tls::boringssl::crypto;
 use crate::tls::key;
 
-#[repr(transparent)]
-struct SslMethod(c_void);
-
-#[repr(transparent)]
-pub struct SslCtx(c_void);
-
-#[repr(transparent)]
-struct Ssl(c_void);
-
-#[repr(transparent)]
-struct SslCipher(c_void);
-
-#[repr(transparent)]
-struct SslSession(c_void);
-
-#[repr(transparent)]
-struct X509Store(c_void);
-
-#[repr(transparent)]
-struct X509(c_void);
-
-#[repr(transparent)]
-struct X509VerifyParam(c_void);
-
-#[repr(transparent)]
-struct StackOf(c_void);
-
-#[repr(transparent)]
-struct CryptoBuffer(c_void);
-
-#[repr(transparent)]
-struct CryptoBufferPool(c_void);
-
-#[repr(transparent)]
-struct Cbb(c_void);
-
-#[repr(transparent)]
-struct CryptoExData(c_void);
-
-#[repr(C)]
-struct SslQuicMethod {
-    set_read_secret: extern "C" fn(
-        ssl: *mut Ssl,
-        level: tls::Level,
-        cipher: *const SslCipher,
-        secret: *const u8,
-        secret_len: usize,
-    ) -> c_int,
-
-    set_write_secret: extern "C" fn(
-        ssl: *mut Ssl,
-        level: tls::Level,
-        cipher: *const SslCipher,
-        secret: *const u8,
-        secret_len: usize,
-    ) -> c_int,
-
-    add_handshake_data:
-        extern "C" fn(ssl: *mut Ssl, level: tls::Level, data: *const u8, len: usize) -> c_int,
-
-    flush_flight: extern "C" fn(ssl: *mut Ssl) -> c_int,
-
-    send_alert: extern "C" fn(ssl: *mut Ssl, level: tls::Level, alert: u8) -> c_int,
-}
+pub type SslCtx = SSL_CTX;
+type Ssl = SSL;
+type SslCipher = SSL_CIPHER;
+type SslSession = SSL_SESSION;
+type X509Store = X509_STORE;
+type CryptoBuffer = CRYPTO_BUFFER;
+type CryptoBufferPool = CRYPTO_BUFFER_POOL;
+type Cbb = CBB;
+type CryptoExData = CRYPTO_EX_DATA;
 
 /// Certificate Compression Algorithm IDs from RFC 8879
 #[repr(C)]
@@ -109,59 +55,14 @@ pub enum CertCompressionAlgorithm {
     Zstd = 3,
 }
 
-#[repr(C)]
-#[derive(PartialEq, Debug)]
-pub enum SslEarlyDataReason {
-    // The handshake has not progressed far enough for the 0-RTT status to be known.
-    Unknown = 0,
-    // 0-RTT is disabled for this connection.
-    Disabled = 1,
-    // 0-RTT was accepted.
-    Accepted = 2,
-    // The negotiated protocol version does not support 0-RTT.
-    ProtocolVersion = 3,
-    // The peer declined to offer or accept 0-RTT for an unknown reason.
-    PeerDeclined = 4,
-    // The client did not offer a session.
-    NoSessionOffered = 5,
-    // The server declined to resume the session.
-    SessionNotResumed = 6,
-    // The session does not support 0-RTT.
-    UnsupportedForSession = 7,
-    // The server sent a HelloRetryRequest.
-    HelloRetryRequest = 8,
-    // The negotiated ALPN protocol did not match the session.
-    AlpnMismatch = 9,
-    // The connection negotiated Channel ID, which is incompatible with 0-RTT.
-    ChannelId = 10,
-    // Value 11 is reserved. (It has historically |ssl_early_data_token_binding|.)
-    // The client and server ticket age were too far apart.
-    TicketAgeSkew = 12,
-    // QUIC parameters differ between this connection and the original.
-    QuicParameterMismatch = 13,
-    // The application settings did not match the session.
-    AlpsMismatch = 14,
-}
+pub type SslEarlyDataReason = ssl_early_data_reason_t;
 
 /// Renegotiation mode for TLS clients. See BoringSSL's `ssl_renegotiate_mode_t`.
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum SslRenegotiateMode {
-    /// Never allow renegotiation (default).
-    Never = 0,
-    /// Allow one renegotiation.
-    Once = 1,
-    /// Allow renegotiation freely.
-    Freely = 2,
-    /// Ignore HelloRequest messages.
-    Ignore = 3,
-    /// Require explicit renegotiation via SSL_renegotiate.
-    Explicit = 4,
-}
+pub type SslRenegotiateMode = ssl_renegotiate_mode_t;
 
 /// Called when TLS context is being destroyed.
 /// See https://commondatastorage.googleapis.com/chromium-boringssl-docs/ex_data.h.html
-extern "C" fn context_data_free(
+unsafe extern "C" fn context_data_free(
     parent: *mut c_void,
     ptr: *mut c_void,
     _ad: *mut CryptoExData,
@@ -182,21 +83,21 @@ extern "C" fn context_data_free(
 lazy_static::lazy_static! {
     /// Boringssl extra data index for tls context.
     pub static ref CONTEXT_DATA_INDEX: c_int = unsafe {
-        SSL_CTX_get_ex_new_index(0, ptr::null(), ptr::null(), ptr::null(), context_data_free)
+        SSL_CTX_get_ex_new_index(0, ptr::null_mut(), ptr::null_mut(), None, Some(context_data_free))
     };
 
     /// Boringssl extra data index for tls session.
     pub static ref SESSION_DATA_INDEX: c_int = unsafe {
-        SSL_get_ex_new_index(0, ptr::null(), ptr::null(), ptr::null(), ptr::null())
+        SSL_get_ex_new_index(0, ptr::null_mut(), ptr::null_mut(), None, None)
     };
 }
 
-static SSL_QUIC_METHOD: SslQuicMethod = SslQuicMethod {
-    set_read_secret,
-    set_write_secret,
-    add_handshake_data,
-    flush_flight,
-    send_alert,
+static SSL_QUIC_METHOD: SSL_QUIC_METHOD = SSL_QUIC_METHOD {
+    set_read_secret: Some(set_read_secret),
+    set_write_secret: Some(set_write_secret),
+    add_handshake_data: Some(add_handshake_data),
+    flush_flight: Some(flush_flight),
+    send_alert: Some(send_alert),
 };
 
 /// Rust wrapper of SSL_CTX which holds various configuration and data relevant
@@ -253,7 +154,7 @@ impl Context {
     /// Create a new TLS session.
     pub fn new_session(&self) -> Result<Session> {
         unsafe {
-            let ssl = SSL_new(self.as_ptr());
+            let ssl = SSL_new(self.as_ptr() as *mut SslCtx);
             Ok(Session::new(ssl))
         }
     }
@@ -354,8 +255,8 @@ impl Context {
             let mut ctx_p =
                 winapi::um::wincrypt::CertEnumCertificatesInStore(sys_store, ptr::null());
             while !ctx_p.is_null() {
-                let in_p = (*ctx_p).pbCertEncoded as *const u8;
-                let cert = d2i_X509(ptr::null_mut(), &in_p, (*ctx_p).cbCertEncoded as i32);
+                let mut in_p = (*ctx_p).pbCertEncoded as *const u8;
+                let cert = d2i_X509(ptr::null_mut(), &mut in_p, (*ctx_p).cbCertEncoded as i32);
                 if !cert.is_null() {
                     X509_STORE_add_cert(crt_store, cert);
                     X509_free(cert);
@@ -378,7 +279,7 @@ impl Context {
                 0x0001, // SSL_SESS_CACHE_CLIENT
             );
 
-            SSL_CTX_sess_set_new_cb(self.as_mut_ptr(), new_session);
+            SSL_CTX_sess_set_new_cb(self.as_mut_ptr(), Some(new_session));
         };
     }
 
@@ -389,7 +290,7 @@ impl Context {
         let mode = i32::from(verify);
 
         unsafe {
-            SSL_CTX_set_verify(self.as_mut_ptr(), mode, ptr::null());
+            SSL_CTX_set_verify(self.as_mut_ptr(), mode, None);
         }
     }
 
@@ -398,7 +299,7 @@ impl Context {
     /// to store this keying material for debugging purposes.
     pub fn enable_keylog(&mut self) {
         unsafe {
-            SSL_CTX_set_keylog_callback(self.as_mut_ptr(), keylog);
+            SSL_CTX_set_keylog_callback(self.as_mut_ptr(), Some(keylog));
         }
     }
 
@@ -417,12 +318,12 @@ impl Context {
             SSL_CTX_set_ex_data(
                 self.as_mut_ptr(),
                 *CONTEXT_DATA_INDEX,
-                Box::into_raw(v) as *const c_void,
+                Box::into_raw(v) as *mut c_void,
             );
         }
 
         unsafe {
-            SSL_CTX_set_alpn_select_cb(self.as_mut_ptr(), select_alpn, ptr::null_mut());
+            SSL_CTX_set_alpn_select_cb(self.as_mut_ptr(), Some(select_alpn), ptr::null_mut());
         }
 
         // SSL_CTX_set_alpn_protos() returns 0 on success.
@@ -434,7 +335,7 @@ impl Context {
 
     /// Set ctx's session ticket key material
     pub fn set_ticket_key(&mut self, key: &[u8]) -> Result<()> {
-        match unsafe { SSL_CTX_set_tlsext_ticket_keys(self.as_mut_ptr(), key.as_ptr(), key.len()) }
+        match unsafe { SSL_CTX_set_tlsext_ticket_keys(self.as_mut_ptr(), key.as_ptr() as *const libc::c_void, key.len()) }
         {
             1 => Ok(()),
             _ => Err(Error::TlsFail("set ticket key failed".to_string())),
@@ -495,8 +396,8 @@ impl Context {
             SSL_CTX_add_cert_compression_alg(
                 self.as_mut_ptr(),
                 algorithm as u16,
-                compress_func,
-                decompress_func,
+                Some(compress_func),
+                Some(decompress_func),
             )
         } {
             1 => Ok(()),
@@ -551,7 +452,7 @@ impl Session {
 
         self.set_min_proto_version(TLS1_3_VERSION);
         self.set_max_proto_version(TLS1_3_VERSION);
-        self.set_renegotiate_mode(SslRenegotiateMode::Explicit);
+        self.set_renegotiate_mode(SslRenegotiateMode::ssl_renegotiate_explicit);
         self.set_shed_handshake_config(true);
         self.set_encrypted_client_hello(true);
         self.set_permute_extensions(true);
@@ -679,7 +580,7 @@ impl Session {
     /// a unique index.
     pub fn set_ex_data<T>(&mut self, idx: c_int, data: *const T) -> Result<()> {
         match unsafe {
-            let ptr = data as *const c_void;
+            let ptr = data as *mut libc::c_void;
             SSL_set_ex_data(self.as_mut_ptr(), idx, ptr)
         } {
             1 => Ok(()),
@@ -712,12 +613,12 @@ impl Session {
 
     /// Set the minimum protocol version for ssl to version.
     pub fn set_min_proto_version(&mut self, version: u16) {
-        unsafe { SSL_set_min_proto_version(self.as_mut_ptr(), version) }
+        unsafe { SSL_set_min_proto_version(self.as_mut_ptr(), version); }
     }
 
     /// Set the maximum protocol version for ssl to version.
     pub fn set_max_proto_version(&mut self, version: u16) {
-        unsafe { SSL_set_max_proto_version(self.as_mut_ptr(), version) }
+        unsafe { SSL_set_max_proto_version(self.as_mut_ptr(), version); }
     }
 
     /// Set quiet shutdown on ssl. If enabled, SSL_shutdown will not send a
@@ -748,7 +649,7 @@ impl Session {
 
     /// Set a callback that is called to select a certificate.
     pub fn set_cert_cb(&mut self) {
-        unsafe { SSL_set_cert_cb(self.as_mut_ptr(), select_cert, std::ptr::null_mut()) }
+        unsafe { SSL_set_cert_cb(self.as_mut_ptr(), Some(select_cert), std::ptr::null_mut()) }
     }
 
     /// Configure ssl to send params in the quic_transport_parameters extension
@@ -832,8 +733,13 @@ impl Session {
     /// Provide data from QUIC at a particular encryption level level.
     pub fn provide_data(&mut self, level: tls::Level, buf: &[u8]) -> Result<()> {
         self.provided_data_outstanding = true;
-        let rc =
-            unsafe { SSL_provide_quic_data(self.as_mut_ptr(), level, buf.as_ptr(), buf.len()) };
+        let lvl = match level {
+            tls::Level::Initial => ssl_encryption_level_t::ssl_encryption_initial,
+            tls::Level::ZeroRTT => ssl_encryption_level_t::ssl_encryption_early_data,
+            tls::Level::Handshake => ssl_encryption_level_t::ssl_encryption_handshake,
+            tls::Level::OneRTT => ssl_encryption_level_t::ssl_encryption_application,
+        };
+        let rc = unsafe { SSL_provide_quic_data(self.as_mut_ptr(), lvl, buf.as_ptr(), buf.len()) };
         self.map_result_ssl(rc, None)
     }
 
@@ -874,7 +780,14 @@ impl Session {
 
     /// Return the current write encryption level.
     pub fn write_level(&self) -> tls::Level {
-        unsafe { SSL_quic_write_level(self.as_ptr()) }
+        let lvl = unsafe { SSL_quic_write_level(self.as_ptr()) };
+        match lvl {
+            ssl_encryption_level_t::ssl_encryption_initial => tls::Level::Initial,
+            ssl_encryption_level_t::ssl_encryption_early_data => tls::Level::ZeroRTT,
+            ssl_encryption_level_t::ssl_encryption_handshake => tls::Level::Handshake,
+            ssl_encryption_level_t::ssl_encryption_application => tls::Level::OneRTT,
+            _ => tls::Level::Initial,
+        }
     }
 
     /// Return the cipher suite used by ssl.
@@ -922,16 +835,21 @@ impl Session {
     /// Return the peer's certificate chain.
     pub fn peer_cert_chain(&self) -> Option<Vec<&[u8]>> {
         let cert_chain = unsafe {
-            let chain = map_result_ptr(SSL_get0_peer_certificates(self.as_ptr())).ok()?;
+            let chain_ptr = SSL_get0_peer_certificates(self.as_ptr());
+            if chain_ptr.is_null() {
+                return None;
+            }
 
-            let num = sk_num(chain);
-            if num <= 0 {
+            let stack = chain_ptr as *const OPENSSL_STACK;
+            let num = OPENSSL_sk_num(stack);
+            if num == 0 {
                 return None;
             }
 
             let mut cert_chain = vec![];
             for i in 0..num {
-                let buffer = map_result_ptr(sk_value(chain, i) as *const CryptoBuffer).ok()?;
+                let buf_ptr = OPENSSL_sk_value(stack, i) as *const CryptoBuffer;
+                let buffer = map_result_ptr(buf_ptr).ok()?;
                 let out_len = CRYPTO_BUFFER_len(buffer);
                 if out_len == 0 {
                     return None;
@@ -950,12 +868,17 @@ impl Session {
     /// Return the peer's certificate.
     pub fn peer_cert(&self) -> Option<&[u8]> {
         let peer_cert = unsafe {
-            let chain = map_result_ptr(SSL_get0_peer_certificates(self.as_ptr())).ok()?;
-            if sk_num(chain) <= 0 {
+            let chain_ptr = SSL_get0_peer_certificates(self.as_ptr());
+            if chain_ptr.is_null() {
+                return None;
+            }
+            let stack = chain_ptr as *const OPENSSL_STACK;
+            if OPENSSL_sk_num(stack) == 0 {
                 return None;
             }
 
-            let buffer = map_result_ptr(sk_value(chain, 0) as *const CryptoBuffer).ok()?;
+            let buf_ptr = OPENSSL_sk_value(stack, 0) as *const CryptoBuffer;
+            let buffer = map_result_ptr(buf_ptr).ok()?;
             let out_len = CRYPTO_BUFFER_len(buffer);
             if out_len == 0 {
                 return None;
@@ -1131,11 +1054,18 @@ fn get_cipher_from_ptr(cipher: *const SslCipher) -> Result<crypto::Algorithm> {
 /// level.
 extern "C" fn set_read_secret(
     ssl: *mut Ssl,
-    level: tls::Level,
+    level: ssl_encryption_level_t,
     cipher: *const SslCipher,
     secret: *const u8,
     secret_len: usize,
 ) -> c_int {
+    let level = match level {
+        ssl_encryption_level_t::ssl_encryption_initial => tls::Level::Initial,
+        ssl_encryption_level_t::ssl_encryption_early_data => tls::Level::ZeroRTT,
+        ssl_encryption_level_t::ssl_encryption_handshake => tls::Level::Handshake,
+        ssl_encryption_level_t::ssl_encryption_application => tls::Level::OneRTT,
+        _ => tls::Level::Initial,
+    };
     let session_data = match get_sess_data_from_ptr::<tls::TlsSessionData>(ssl, *SESSION_DATA_INDEX)
     {
         Some(v) => v,
@@ -1171,11 +1101,18 @@ extern "C" fn set_read_secret(
 /// encryption level. It will be called at most once per encryption level.
 extern "C" fn set_write_secret(
     ssl: *mut Ssl,
-    level: tls::Level,
+    level: ssl_encryption_level_t,
     cipher: *const SslCipher,
     secret: *const u8,
     secret_len: usize,
 ) -> c_int {
+    let level = match level     {
+        ssl_encryption_level_t::ssl_encryption_initial => tls::Level::Initial,
+        ssl_encryption_level_t::ssl_encryption_early_data => tls::Level::ZeroRTT,
+        ssl_encryption_level_t::ssl_encryption_handshake => tls::Level::Handshake,
+        ssl_encryption_level_t::ssl_encryption_application => tls::Level::OneRTT,
+        _ => tls::Level::Initial,
+    };
     let session_data = match get_sess_data_from_ptr::<tls::TlsSessionData>(ssl, *SESSION_DATA_INDEX)
     {
         Some(v) => v,
@@ -1212,10 +1149,17 @@ extern "C" fn set_write_secret(
 /// encryption level. It returns one on success and zero on error.
 extern "C" fn add_handshake_data(
     ssl: *mut Ssl,
-    level: tls::Level,
+    level: ssl_encryption_level_t,
     data: *const u8,
     len: usize,
 ) -> c_int {
+        let level = match level {
+        ssl_encryption_level_t::ssl_encryption_initial => tls::Level::Initial,
+        ssl_encryption_level_t::ssl_encryption_early_data => tls::Level::ZeroRTT,
+        ssl_encryption_level_t::ssl_encryption_handshake => tls::Level::Handshake,
+        ssl_encryption_level_t::ssl_encryption_application => tls::Level::OneRTT,
+        _ => tls::Level::Initial,
+    };
     let session_data = match get_sess_data_from_ptr::<tls::TlsSessionData>(ssl, *SESSION_DATA_INDEX)
     {
         Some(v) => v,
@@ -1246,7 +1190,7 @@ extern "C" fn flush_flight(_ssl: *mut Ssl) -> c_int {
 
 /// send_alert sends a fatal alert at the specified encryption level. It
 /// returns one on success and zero on error.
-extern "C" fn send_alert(ssl: *mut Ssl, level: tls::Level, alert: u8) -> c_int {
+extern "C" fn send_alert(ssl: *mut Ssl, level: ssl_encryption_level_t, alert: u8) -> c_int {
     let session_data = match get_sess_data_from_ptr::<tls::TlsSessionData>(ssl, *SESSION_DATA_INDEX)
     {
         Some(v) => v,
@@ -1255,7 +1199,15 @@ extern "C" fn send_alert(ssl: *mut Ssl, level: tls::Level, alert: u8) -> c_int {
 
     trace!(
         "{} send alert level {:?} alert {:x}",
-        session_data.trace_id, level, alert
+        session_data.trace_id,
+        match level {
+            ssl_encryption_level_t::ssl_encryption_initial => tls::Level::Initial,
+            ssl_encryption_level_t::ssl_encryption_early_data => tls::Level::ZeroRTT,
+            ssl_encryption_level_t::ssl_encryption_handshake => tls::Level::Handshake,
+            ssl_encryption_level_t::ssl_encryption_application => tls::Level::OneRTT,
+            _ => tls::Level::Initial,
+        },
+        alert
     );
 
     const TLS_ALERT_ERROR: u64 = 0x100;
@@ -1274,8 +1226,8 @@ extern "C" fn send_alert(ssl: *mut Ssl, level: tls::Level, alert: u8) -> c_int {
 ///
 /// The output is NSS key log format which is described in:
 /// https://udn.realityripple.com/docs/Mozilla/Projects/NSS/Key_Log_Format.
-extern "C" fn keylog(ssl: *mut Ssl, line: *const c_char) {
-    let session_data = match get_sess_data_from_ptr::<tls::TlsSessionData>(ssl, *SESSION_DATA_INDEX)
+extern "C" fn keylog(ssl: *const Ssl, line: *const c_char) {
+    let session_data = match get_sess_data_from_ptr::<tls::TlsSessionData>(ssl as *mut Ssl, *SESSION_DATA_INDEX)
     {
         Some(v) => v,
         None => return,
@@ -1298,7 +1250,7 @@ extern "C" fn select_alpn(
     ssl: *mut Ssl,
     out: *mut *const u8,
     out_len: *mut u8,
-    inp: *mut u8,
+    inp: *const u8,
     in_len: c_uint,
     _arg: *mut c_void,
 ) -> c_int {
@@ -1393,7 +1345,7 @@ extern "C" fn select_cert(ssl: *mut Ssl, _arg: *mut c_void) -> c_int {
 
         // Apply the customized tls config for the SSL connection.
         let tls_ctx = &tls_config.unwrap().tls_ctx;
-        let ssl_ctx = unsafe { SSL_set_SSL_CTX(ssl, tls_ctx.as_ptr()) };
+        let ssl_ctx = unsafe { SSL_set_SSL_CTX(ssl, tls_ctx.ctx_raw) };
         if ssl_ctx.is_null() {
             trace!("{} set SSL_CTX failed", session_data.trace_id);
             return 0;
@@ -1598,413 +1550,15 @@ fn map_result_ptr<'a, T>(bssl_result: *const T) -> Result<&'a T> {
 }
 
 fn get_ssl_error() -> Result<String> {
-    let err = [0; 1024];
+    let mut err = [0u8; 1024];
 
     unsafe {
         let e = ERR_peek_error();
-        ERR_error_string_n(e, err.as_ptr(), err.len());
+        ERR_error_string_n(e, err.as_mut_ptr() as *mut c_char, err.len());
     }
 
     let err = std::str::from_utf8(&err)
         .map_err(|e| Error::TlsFail(format!("ssl error message format incorrect: {:?}", e)))?;
 
     Ok(err.trim_end_matches('\0').to_string())
-}
-
-unsafe extern "C" {
-    /// SSL_METHOD used for TLS connections.
-    fn TLS_method() -> *const SslMethod;
-
-    /// Return a newly-allocated SslCtx with default settings or NULL on error.
-    fn SSL_CTX_new(method: *const SslMethod) -> *mut SslCtx;
-
-    /// Release memory associated with ctx.
-    fn SSL_CTX_free(ctx: *mut SslCtx);
-
-    /// Configure certificate for ctx.
-    fn SSL_CTX_use_certificate_chain_file(ctx: *mut SslCtx, file: *const c_char) -> c_int;
-
-    /// Configure private key for ctx.
-    fn SSL_CTX_use_PrivateKey_file(ctx: *mut SslCtx, file: *const c_char, ty: c_int) -> c_int;
-
-    /// Load trust anchors from file.
-    fn SSL_CTX_load_verify_locations(
-        ctx: *mut SslCtx,
-        file: *const c_char,
-        path: *const c_char,
-    ) -> c_int;
-
-    /// Load trust anchors from directory in OpenSSL's hashed directory format.
-    fn SSL_CTX_set_default_verify_paths(ctx: *mut SslCtx) -> c_int;
-
-    /// Return ctx's certificate store.
-    fn SSL_CTX_get_cert_store(ctx: *mut SslCtx) -> *mut X509Store;
-
-    /// Configure certificate verification behavior.
-    fn SSL_CTX_set_verify(ctx: *mut SslCtx, mode: c_int, cb: *const c_void);
-
-    /// Configure a callback to log key material.
-    fn SSL_CTX_set_keylog_callback(
-        ctx: *mut SslCtx,
-        cb: extern "C" fn(ssl: *mut Ssl, line: *const c_char),
-    );
-
-    /// Set session ticket key.
-    fn SSL_CTX_set_tlsext_ticket_keys(ctx: *mut SslCtx, key: *const u8, key_len: usize) -> c_int;
-
-    /// Set the client ALPN protocol list.
-    /// protos must be in wire-format (i.e. a series of non-empty, 8-bit length-prefixed strings),
-    /// or the empty string to disable ALPN.
-    /// Return zero on success and one on failure.
-    fn SSL_CTX_set_alpn_protos(ctx: *mut SslCtx, protos: *const u8, protos_len: usize) -> c_int;
-
-    /// Set a callback function on ctx that is called during ClientHello processing in order to
-    /// select an ALPN protocol from the client's list of offered protocols.
-    fn SSL_CTX_set_alpn_select_cb(
-        ctx: *mut SslCtx,
-        cb: extern "C" fn(
-            ssl: *mut Ssl,
-            out: *mut *const u8,
-            out_len: *mut u8,
-            inp: *mut u8,
-            in_len: c_uint,
-            arg: *mut c_void,
-        ) -> c_int,
-        arg: *mut c_void,
-    );
-
-    /// Set whether early data is allowed.
-    fn SSL_CTX_set_early_data_enabled(ctx: *mut SslCtx, enabled: i32);
-
-    /// Set the lifetime, in seconds, of TLS 1.3 sessions created in ctx to timeout.
-    fn SSL_CTX_set_session_psk_dhe_timeout(ctx: *mut SslCtx, timeout: u32);
-
-    /// Set the session cache mode.
-    fn SSL_CTX_set_session_cache_mode(ctx: *mut SslCtx, mode: c_int) -> c_int;
-
-    /// Set the callback to be called when a new session is established and ready to be cached.
-    fn SSL_CTX_sess_set_new_cb(
-        ctx: *mut SslCtx,
-        cb: extern "C" fn(ssl: *mut Ssl, session: *mut SslSession) -> c_int,
-    );
-
-    /// Get the new index of allocated for SSL_CTX extra data.
-    fn SSL_CTX_get_ex_new_index(
-        argl: c_long,
-        argp: *const c_void,
-        unused: *const c_void,
-        dup_unused: *const c_void,
-        free_func: extern "C" fn(
-            parent: *mut c_void,
-            ptr: *mut c_void,
-            ad: *mut CryptoExData,
-            index: c_int,
-            arg1: c_long,
-            argp: *mut c_void,
-        ),
-    ) -> c_int;
-
-    /// Store arbitrary user data into the SSL object. The user must supply a
-    /// unique index which they can subsequently use to retrieve the data
-    /// using SSL*_get_ex_data().
-    fn SSL_CTX_set_ex_data(ctx: *mut SslCtx, idx: c_int, ptr: *const c_void) -> c_int;
-
-    /// Return the user data indexed by the unique index.
-    fn SSL_CTX_get_ex_data(ctx: *mut SslCtx, idx: c_int) -> *mut c_void;
-
-    /// Change ssl's SSL_CTX. ssl will use the certificate-related settings from ctx,
-    /// and SSL_get_SSL_CTX will report ctx.
-    /// This function may be used during the callbacks registered by
-    /// SSL_CTX_set_select_certificate_cb, SSL_CTX_set_tlsext_servername_callback, and
-    /// SSL_CTX_set_cert_cb or when the handshake is paused from them.
-    /// It is typically used to switch certificates based on SNI.
-    /// Note the session cache and related settings will continue to use the initial SSL_CTX.
-    fn SSL_set_SSL_CTX(ssl: *mut Ssl, ssl_ctx: *const SslCtx) -> *mut SslCtx;
-
-    /// Return SslCtx associated with ssl.
-    fn SSL_get_SSL_CTX(ssl: *const Ssl) -> *mut SslCtx;
-
-    /// Get the new index of allocated for SSL extra data.
-    fn SSL_get_ex_new_index(
-        argl: c_long,
-        argp: *const c_void,
-        unused: *const c_void,
-        dup_unused: *const c_void,
-        free_func: *const c_void,
-    ) -> c_int;
-
-    /// Return a newly-allocated Ssl with default settings or NULL on error.
-    fn SSL_new(ctx: *const SslCtx) -> *mut Ssl;
-
-    /// Set a callback that is called to select a certificate.
-    /// The callback returns one on success, zero on internal error, and a negative number
-    /// on failure or to pause the handshake.
-    /// The callback will be called after extensions have been processed, but before the resumption
-    /// decision has been made.
-    fn SSL_set_cert_cb(
-        ssl: *mut Ssl,
-        cb: extern "C" fn(ssl: *mut Ssl, arg: *mut c_void) -> c_int,
-        arg: *mut c_void,
-    );
-
-    /// Configure ssl to be a server.
-    fn SSL_set_accept_state(ssl: *mut Ssl);
-
-    /// Configure ssl to be a client.
-    fn SSL_set_connect_state(ssl: *mut Ssl);
-
-    /// Store arbitrary user data into the SSL object. The user must supply a
-    /// unique index which they can subsequently use to retrieve the data
-    /// using SSL*_get_ex_data().
-    fn SSL_set_ex_data(ssl: *mut Ssl, idx: c_int, ptr: *const c_void) -> c_int;
-
-    /// Return the user data indexed by the unique index.
-    fn SSL_get_ex_data(ssl: *mut Ssl, idx: c_int) -> *mut c_void;
-
-    /// Configure the quic_transport_parameters extension in either the ClientHello or EncryptedExtensions.
-    fn SSL_set_quic_transport_params(ssl: *mut Ssl, params: *const u8, params_len: usize) -> c_int;
-
-    /// Get the quic_transport_parameters extension sent by the peer.
-    fn SSL_get_peer_quic_transport_params(
-        ssl: *const Ssl,
-        out_params: *mut *const u8,
-        out_params_len: *mut usize,
-    );
-
-    /// For a client, configure the session resumption.
-    fn SSL_set_session(ssl: *mut Ssl, session: *mut SslSession) -> c_int;
-
-    /// Set the minimum TLS protocol versions to be used.
-    fn SSL_set_min_proto_version(ssl: *mut Ssl, version: u16);
-
-    /// Set the maximum TLS protocol versions to be used.
-    fn SSL_set_max_proto_version(ssl: *mut Ssl, version: u16);
-
-    /// Set quiet shutdown mode.
-    fn SSL_set_quiet_shutdown(ssl: *mut Ssl, mode: c_int);
-
-    /// For a client, set the hostname to be used for SNI.
-    fn SSL_set_tlsext_host_name(ssl: *mut Ssl, name: *const c_char) -> c_int;
-
-    /// Configure the QUIC hooks.
-    fn SSL_set_quic_method(ssl: *mut Ssl, quic_method: *const SslQuicMethod) -> c_int;
-
-    /// For a server, configure a context string for accepting early data.
-    fn SSL_set_quic_early_data_context(
-        ssl: *mut Ssl,
-        context: *const u8,
-        context_len: usize,
-    ) -> c_int;
-
-    /// Provide data from QUIC at a particular encryption level.
-    fn SSL_provide_quic_data(
-        ssl: *mut Ssl,
-        level: tls::Level,
-        data: *const u8,
-        len: usize,
-    ) -> c_int;
-
-    /// Process any data that QUIC has provided after the handshake has completed.
-    fn SSL_process_quic_post_handshake(ssl: *mut Ssl) -> c_int;
-
-    /// Reset ssl after an early data reject.
-    fn SSL_reset_early_data_reject(ssl: *mut Ssl);
-
-    /// Continue the current handshake.
-    fn SSL_do_handshake(ssl: *mut Ssl) -> c_int;
-
-    /// Return the current write encryption level.
-    fn SSL_quic_write_level(ssl: *const Ssl) -> tls::Level;
-
-    /// Return true if performed an abbreviated handshake.
-    fn SSL_session_reused(ssl: *const Ssl) -> c_int;
-
-    /// Return true if the handshake is pending.
-    fn SSL_in_init(ssl: *const Ssl) -> c_int;
-
-    /// Return true if the pending handshake has progressed enough to send or receive early data.
-    fn SSL_in_early_data(ssl: *const Ssl) -> c_int;
-
-    /// Return error code for the last error that occurred on ssl.
-    fn SSL_get_error(ssl: *const Ssl, ret_code: c_int) -> c_int;
-
-    /// Return current cipher suite.
-    fn SSL_get_current_cipher(ssl: *const Ssl) -> *const SslCipher;
-
-    /// Return the id of the current cipher suite.
-    fn SSL_get_curve_id(ssl: *const Ssl) -> u16;
-
-    /// Return the name of the current cipher suite.
-    fn SSL_get_curve_name(curve: u16) -> *const c_char;
-
-    /// Return the signature algorithm used by the peer.
-    fn SSL_get_peer_signature_algorithm(ssl: *const Ssl) -> u16;
-
-    /// Return a human-readable name of the signature algorithm used by the peer.
-    fn SSL_get_signature_algorithm_name(sigalg: u16, include_curve: i32) -> *const c_char;
-
-    /// Return ssl's X509VerifyParam for certificate verification.
-    fn SSL_get0_param(ssl: *mut Ssl) -> *mut X509VerifyParam;
-
-    /// Return the peer's certificate chain.
-    fn SSL_get0_peer_certificates(ssl: *const Ssl) -> *const StackOf;
-
-    /// Get the selected ALPN protocol.
-    fn SSL_get0_alpn_selected(ssl: *const Ssl, out: *mut *const u8, out_len: *mut u32);
-
-    /// Add ALPS application settings for a given ALPN protocol
-    fn SSL_add_application_settings(
-        ssl: *mut Ssl,
-        proto: *const u8,
-        proto_len: usize,
-        settings: *const u8,
-        settings_len: usize,
-    ) -> c_int;
-
-    /// For a server, return the hostname supplied by the client.
-    fn SSL_get_servername(ssl: *const Ssl, ty: c_int) -> *const c_char;
-
-    /// Return details why 0-RTT was accepted or rejected on ssl.
-    fn SSL_get_early_data_reason(ssl: *const Ssl) -> SslEarlyDataReason;
-
-    /// Return a string representation for reason, or NULL if reason is unknown.
-    fn SSL_early_data_reason_string(reason: SslEarlyDataReason) -> *const c_char;
-
-    /// Reset ssl to allow another connection.
-    fn SSL_clear(ssl: *mut Ssl) -> c_int;
-
-    /// Release memory associated with ssl.
-    fn SSL_free(ssl: *mut Ssl);
-
-    /// Return cipher's non-IANA id.
-    fn SSL_CIPHER_get_id(cipher: *const SslCipher) -> c_uint;
-
-    /// Serialize session to bytes.
-    fn SSL_SESSION_to_bytes(
-        session: *const SslSession,
-        out: *mut *mut u8,
-        out_len: *mut usize,
-    ) -> c_int;
-
-    /// Parse bytes into a session.
-    fn SSL_SESSION_from_bytes(
-        input: *const u8,
-        input_len: usize,
-        ctx: *const SslCtx,
-    ) -> *mut SslSession;
-
-    /// Decrements the reference count of session.
-    /// If it reaches zero, all data referenced by session and session itself are released.
-    fn SSL_SESSION_free(session: *mut SslSession);
-
-    /// Add the cert object to the X509_STORE's local storage.
-    fn X509_STORE_add_cert(ctx: *mut X509Store, x: *mut X509) -> c_int;
-
-    /// Decrement the reference count of X509 structure a and frees it up if
-    /// the reference count is zero.
-    fn X509_free(x: *mut X509);
-
-    /// Decode input bytes and return a pointer to the X509 structure
-    fn d2i_X509(px: *mut X509, input: *const *const u8, len: c_int) -> *mut X509;
-
-    /// Set cerfificate verification hostname.
-    fn X509_VERIFY_PARAM_set1_host(
-        param: *mut X509VerifyParam,
-        name: *const c_char,
-        namelen: usize,
-    ) -> c_int;
-
-    /// Return the number of elements in stack.
-    fn sk_num(stack: *const StackOf) -> c_int;
-
-    /// Return the pointer to the element at idx in stack.
-    fn sk_value(stack: *const StackOf, idx: c_int) -> *mut c_void;
-
-    /// Return the length, in bytes, of the data contained in buffer.
-    fn CRYPTO_BUFFER_len(buffer: *const CryptoBuffer) -> usize;
-
-    /// Return a pointer to the data contained in buffer.
-    fn CRYPTO_BUFFER_data(buffer: *const CryptoBuffer) -> *const u8;
-
-    /// Get the packed error code for the least recent error but do not remove it from the queue.
-    fn ERR_peek_error() -> c_uint;
-
-    /// Generate a human-readable error string for err.
-    fn ERR_error_string_n(err: c_uint, buf: *const u8, len: usize);
-
-    /// Release memory associated with ptr.
-    fn OPENSSL_free(ptr: *mut c_void);
-
-    /// Certificate compression algorithm types
-    /// TLS Certificate Compression Algorithm IDs from RFC 8879
-    /// Algorithm 1: zlib
-    /// Algorithm 2: brotli
-    /// Algorithm 3: zstd
-
-    /// Add a certificate compression algorithm to ctx.
-    /// Returns 1 on success and 0 on error.
-    fn SSL_CTX_add_cert_compression_alg(
-        ctx: *mut SslCtx,
-        alg_id: u16,
-        compress_func: extern "C" fn(
-            ssl: *mut Ssl,
-            out: *mut Cbb,
-            in_data: *const u8,
-            in_len: usize,
-        ) -> c_int,
-        decompress_func: extern "C" fn(
-            ssl: *mut Ssl,
-            out: *mut *mut CryptoBuffer,
-            uncompressed_len: usize,
-            in_data: *const u8,
-            in_len: usize,
-        ) -> c_int,
-    ) -> c_int;
-
-    /// CBB (Crypto Byte Builder) functions for building byte strings
-    fn CBB_add_bytes(cbb: *mut Cbb, data: *const u8, len: usize) -> c_int;
-
-    /// CRYPTO_BUFFER functions for managing certificate data
-    fn CRYPTO_BUFFER_new(
-        data: *const u8,
-        len: usize,
-        pool: *mut CryptoBufferPool,
-    ) -> *mut CryptoBuffer;
-
-    /// Set curves
-    fn SSL_CTX_set1_curves_list(ctx: *mut SslCtx, curves: *const c_char) -> c_int;
-
-    /// Set signature algorithms.
-    fn SSL_CTX_set1_sigalgs_list(ctx: *mut SslCtx, sigalgs: *const c_char) -> c_int;
-
-    /// Enable signed certificate timestamps.
-    fn SSL_enable_signed_cert_timestamps(ssl: *mut Ssl);
-
-    /// Enable OCSP stapling.
-    fn SSL_enable_ocsp_stapling(ssl: *mut Ssl);
-
-    /// Configure how a client reacts to renegotiation attempts by a server.
-    fn SSL_set_renegotiate_mode(ssl: *mut Ssl, mode: SslRenegotiateMode);
-
-    /// Shed handshake config.
-    fn SSL_set_shed_handshake_config(ssl: *mut Ssl, enable: c_int);
-
-    /// Set whether to enable ECH grease.
-    fn SSL_set_enable_ech_grease(ssl: *mut Ssl, enable: c_int);
-
-    /// Permute extensions.
-    fn SSL_set_permute_extensions(ssl: *mut Ssl, enable: c_int);
-
-    /// Enable using new ALPS codepoint (17613)
-    fn SSL_set_alps_use_new_codepoint(ssl: *mut Ssl, use_new: c_int);
-
-    /// Set explicit client key shares (TLS 1.3)
-    fn SSL_set1_client_key_shares(
-        ssl: *mut Ssl,
-        group_ids: *const u16,
-        num_group_ids: usize,
-    ) -> c_int;
-
-    /// Set supported group IDs for this SSL
-    fn SSL_set1_group_ids(ssl: *mut Ssl, group_ids: *const u16, num_group_ids: usize) -> c_int;
 }

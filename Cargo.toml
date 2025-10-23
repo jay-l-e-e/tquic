@@ -1,6 +1,6 @@
 [package]
 name = "tquic-mimic-chromium-client"
-version = "0.0.5"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.90.0"
 license = "Apache-2.0"
@@ -15,21 +15,7 @@ include = [
     "/*.toml",
     "/LICENSE",
     "/src",
-    "/include",
-    "/deps/boringssl/**/*.[chS]",
-    "/deps/boringssl/**/*.asm",
-    "/deps/boringssl/crypto/**/*.cc",
-    "/deps/boringssl/ssl/**/*.cc",
-    "/deps/boringssl/gen/**/*.cc",
-    "/deps/boringssl/decrepit/**/*.cc",
-    "/deps/boringssl/pki/**/*.cc",
-    "/deps/boringssl/tool/**/*.cc",
-    "/deps/boringssl/**/*.inc",
-    "/deps/boringssl/cmake/*.cmake",
-    "/deps/boringssl/util/go_tests.txt",
-    "/deps/boringssl/**/CMakeLists.txt",
-    "/deps/boringssl/**/sources.cmake",
-    "/deps/boringssl/LICENSE",
+    "/include"
 ]
 
 [package.metadata.docs.rs]
@@ -46,6 +32,7 @@ ffi = []
 qlog = ["dep:serde", "dep:serde_derive", "dep:serde_with"]
 
 [workspace.dependencies]
+boring-sys-vendit = "0.0.1"
 brotli = "8.0"
 bytes = "1"
 enumflags2 = "0.7"
@@ -72,6 +59,7 @@ url = "2.5"
 zstd = "0.13"
 
 [dependencies]
+boring-sys-vendit.workspace = true
 brotli.workspace = true
 bytes.workspace = true
 enumflags2.workspace = true

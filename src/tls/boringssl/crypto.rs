@@ -14,10 +14,19 @@
 
 use std::mem::MaybeUninit;
 
-use libc::c_int;
-use libc::c_void;
 use ring::aead;
 use ring::hkdf;
+use boring_sys_vendit::{
+    EVP_AEAD,
+    EVP_AEAD_CTX,
+    EVP_AEAD_CTX_cleanup,
+    EVP_AEAD_CTX_init,
+    EVP_AEAD_CTX_open,
+    EVP_AEAD_CTX_seal_scatter,
+    EVP_aead_aes_128_gcm,
+    EVP_aead_aes_256_gcm,
+    EVP_aead_chacha20_poly1305,
+};
 
 use crate::Error;
 use crate::Result;
@@ -95,7 +104,7 @@ impl HeaderKey {
 }
 
 struct PacketKey {
-    ctx: EvpAeadCtx,
+    ctx: EVP_AEAD_CTX,
     nonce: Vec<u8>,
 }
 
@@ -105,6 +114,12 @@ impl PacketKey {
             ctx: new_aead_ctx(algor, &key)?,
             nonce: iv,
         })
+    }
+}
+
+impl Drop for PacketKey {
+    fn drop(&mut self) {
+        unsafe { EVP_AEAD_CTX_cleanup(&mut self.ctx) };
     }
 }
 
@@ -351,7 +366,7 @@ pub fn derive_initial_secrets(cid: &[u8], version: u32) -> Result<(Open, Seal)> 
     ))
 }
 
-fn evp_aead_algor(algor: &Algorithm) -> *const EvpAead {
+fn evp_aead_algor(algor: &Algorithm) -> *const EVP_AEAD {
     match algor {
         Algorithm::Aes128Gcm => unsafe { EVP_aead_aes_128_gcm() },
         Algorithm::Aes256Gcm => unsafe { EVP_aead_aes_256_gcm() },
@@ -359,7 +374,7 @@ fn evp_aead_algor(algor: &Algorithm) -> *const EvpAead {
     }
 }
 
-fn new_aead_ctx(algor: Algorithm, key: &[u8]) -> Result<EvpAeadCtx> {
+fn new_aead_ctx(algor: Algorithm, key: &[u8]) -> Result<EVP_AEAD_CTX> {
     let mut ctx = MaybeUninit::uninit();
 
     let ctx = unsafe {
@@ -403,64 +418,4 @@ fn build_nonce(iv: &[u8], cid_seq: Option<u32>, counter: u64) -> [u8; aead::NONC
     }
 
     nonce
-}
-
-#[repr(transparent)]
-struct EvpAead(c_void);
-
-#[repr(C)]
-struct EvpAeadCtx {
-    aead: libc::uintptr_t,
-    opaque: [u8; 580],
-    alignment: u64,
-    tag_len: u8,
-}
-
-unsafe extern "C" {
-    fn EVP_aead_aes_128_gcm() -> *const EvpAead;
-
-    fn EVP_aead_aes_256_gcm() -> *const EvpAead;
-
-    fn EVP_aead_chacha20_poly1305() -> *const EvpAead;
-
-    /// Initialize ctx for the given AEAD algorithm.
-    fn EVP_AEAD_CTX_init(
-        ctx: *mut EvpAeadCtx,
-        aead: *const EvpAead,
-        key: *const u8,
-        key_len: usize,
-        tag_len: usize,
-        engine: *mut c_void,
-    ) -> c_int;
-
-    /// Authenticate `in_len` bytes from `input` and `ad_len` bytes from `ad` and decrypts at most `in_len` bytes into `out`.
-    fn EVP_AEAD_CTX_open(
-        ctx: *const EvpAeadCtx,
-        out: *mut u8,
-        out_len: *mut usize,
-        max_out_len: usize,
-        nonce: *const u8,
-        nonce_len: usize,
-        input: *const u8,
-        in_len: usize,
-        ad: *const u8,
-        ad_len: usize,
-    ) -> c_int;
-
-    /// Encrypt and authenticate `in_len` bytes from `input` and authenticate `ad_len` bytes from `ad`. Write `in_len` bytes of ciphertext to `out` and the authentication tag to `out_tag`.
-    fn EVP_AEAD_CTX_seal_scatter(
-        ctx: *const EvpAeadCtx,
-        out: *mut u8,
-        out_tag: *mut u8,
-        out_tag_len: *mut usize,
-        max_out_tag_len: usize,
-        nonce: *const u8,
-        nonce_len: usize,
-        input: *const u8,
-        in_len: usize,
-        extra_in: *const u8,
-        extra_in_len: usize,
-        ad: *const u8,
-        ad_len: usize,
-    ) -> c_int;
 }
