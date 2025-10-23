@@ -72,6 +72,9 @@ fn new_boringssl_cmake_config() -> cmake::Config {
 
     let mut boringssl_cmake = cmake::Config::new("deps/boringssl");
 
+    // Do not configure or run tests in package builds; avoids references to util/go_tests.txt, etc.
+    boringssl_cmake.define("BUILD_TESTING", "OFF");
+
     // Align MSVC runtime with Rust's choice (/MD) in all configurations.
     // Rust uses the non-debug CRT even for debug builds, so force CMake
     // to use MultiThreadedDLL to avoid MSVCRTD/MSVCRT conflicts.
