@@ -17,13 +17,13 @@ use std::io::Write;
 use std::ptr;
 use std::slice;
 
+use boring_sys_vendit::*;
 use libc::c_char;
 use libc::c_int;
 use libc::c_long;
 use libc::c_uint;
 use libc::c_void;
 use log::trace;
-use boring_sys_vendit::*;
 
 use crate::Error;
 use crate::Result;
@@ -335,8 +335,13 @@ impl Context {
 
     /// Set ctx's session ticket key material
     pub fn set_ticket_key(&mut self, key: &[u8]) -> Result<()> {
-        match unsafe { SSL_CTX_set_tlsext_ticket_keys(self.as_mut_ptr(), key.as_ptr() as *const libc::c_void, key.len()) }
-        {
+        match unsafe {
+            SSL_CTX_set_tlsext_ticket_keys(
+                self.as_mut_ptr(),
+                key.as_ptr() as *const libc::c_void,
+                key.len(),
+            )
+        } {
             1 => Ok(()),
             _ => Err(Error::TlsFail("set ticket key failed".to_string())),
         }
@@ -613,12 +618,16 @@ impl Session {
 
     /// Set the minimum protocol version for ssl to version.
     pub fn set_min_proto_version(&mut self, version: u16) {
-        unsafe { SSL_set_min_proto_version(self.as_mut_ptr(), version); }
+        unsafe {
+            SSL_set_min_proto_version(self.as_mut_ptr(), version);
+        }
     }
 
     /// Set the maximum protocol version for ssl to version.
     pub fn set_max_proto_version(&mut self, version: u16) {
-        unsafe { SSL_set_max_proto_version(self.as_mut_ptr(), version); }
+        unsafe {
+            SSL_set_max_proto_version(self.as_mut_ptr(), version);
+        }
     }
 
     /// Set quiet shutdown on ssl. If enabled, SSL_shutdown will not send a
@@ -1106,7 +1115,7 @@ extern "C" fn set_write_secret(
     secret: *const u8,
     secret_len: usize,
 ) -> c_int {
-    let level = match level     {
+    let level = match level {
         ssl_encryption_level_t::ssl_encryption_initial => tls::Level::Initial,
         ssl_encryption_level_t::ssl_encryption_early_data => tls::Level::ZeroRTT,
         ssl_encryption_level_t::ssl_encryption_handshake => tls::Level::Handshake,
@@ -1153,7 +1162,7 @@ extern "C" fn add_handshake_data(
     data: *const u8,
     len: usize,
 ) -> c_int {
-        let level = match level {
+    let level = match level {
         ssl_encryption_level_t::ssl_encryption_initial => tls::Level::Initial,
         ssl_encryption_level_t::ssl_encryption_early_data => tls::Level::ZeroRTT,
         ssl_encryption_level_t::ssl_encryption_handshake => tls::Level::Handshake,
@@ -1227,11 +1236,11 @@ extern "C" fn send_alert(ssl: *mut Ssl, level: ssl_encryption_level_t, alert: u8
 /// The output is NSS key log format which is described in:
 /// https://udn.realityripple.com/docs/Mozilla/Projects/NSS/Key_Log_Format.
 extern "C" fn keylog(ssl: *const Ssl, line: *const c_char) {
-    let session_data = match get_sess_data_from_ptr::<tls::TlsSessionData>(ssl as *mut Ssl, *SESSION_DATA_INDEX)
-    {
-        Some(v) => v,
-        None => return,
-    };
+    let session_data =
+        match get_sess_data_from_ptr::<tls::TlsSessionData>(ssl as *mut Ssl, *SESSION_DATA_INDEX) {
+            Some(v) => v,
+            None => return,
+        };
 
     if let Some(keylog) = &mut session_data.keylog {
         let data = unsafe { ffi::CStr::from_ptr(line).to_bytes() };

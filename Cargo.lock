@@ -1880,7 +1880,7 @@ dependencies = [
 
 [[package]]
 name = "tquic-mimic-chromium-client"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "boring-sys-vendit",
  "brotli",
@@ -1920,7 +1920,7 @@ dependencies = [
 
 [[package]]
 name = "tquic_tools"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "brotli",
  "bytes",

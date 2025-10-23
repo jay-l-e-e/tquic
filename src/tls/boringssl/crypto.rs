@@ -14,19 +14,13 @@
 
 use std::mem::MaybeUninit;
 
-use ring::aead;
-use ring::hkdf;
 use boring_sys_vendit::{
-    EVP_AEAD,
-    EVP_AEAD_CTX,
-    EVP_AEAD_CTX_cleanup,
-    EVP_AEAD_CTX_init,
-    EVP_AEAD_CTX_open,
-    EVP_AEAD_CTX_seal_scatter,
-    EVP_aead_aes_128_gcm,
-    EVP_aead_aes_256_gcm,
+    EVP_AEAD, EVP_AEAD_CTX, EVP_AEAD_CTX_cleanup, EVP_AEAD_CTX_init, EVP_AEAD_CTX_open,
+    EVP_AEAD_CTX_seal_scatter, EVP_aead_aes_128_gcm, EVP_aead_aes_256_gcm,
     EVP_aead_chacha20_poly1305,
 };
+use ring::aead;
+use ring::hkdf;
 
 use crate::Error;
 use crate::Result;

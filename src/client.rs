@@ -1,7 +1,9 @@
-use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::time::Instant;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use mio::net::UdpSocket;
@@ -237,6 +239,7 @@ struct InternalState {
     response_status: Option<u16>,
     finished: bool,
     http3: Option<Http3Connection>,
+    error: Option<String>,
 }
 
 impl InternalState {
@@ -248,6 +251,7 @@ impl InternalState {
             response_status: None,
             finished: false,
             http3: None,
+            error: None,
         }
     }
 }
@@ -256,7 +260,7 @@ pub struct Client {
     endpoint: Endpoint,
     socket_ipv4: Option<Arc<UdpSocket>>,
     socket_ipv6: Option<Arc<UdpSocket>>,
-    state: Arc<Mutex<InternalState>>,
+    state: Rc<RefCell<InternalState>>,
     receive_buffer: Vec<u8>,
 }
 
@@ -379,7 +383,7 @@ impl Client {
         let local_v6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
         let socket_ipv4 = bind_udp(local_v4).ok().map(Arc::new);
         let socket_ipv6 = bind_udp(local_v6).ok().map(Arc::new);
-        let state = Arc::new(Mutex::new(InternalState::new()));
+        let state = Rc::new(RefCell::new(InternalState::new()));
         let handler = ClientHandler::new(state.clone());
         let sender = std::rc::Rc::new(UdpSender {
             socket_ipv4: socket_ipv4.clone(),
@@ -417,10 +421,14 @@ impl Client {
             body: request.body,
         };
 
-        self.state.lock().unwrap().request_plan = Some((uri.clone(), owned_req));
+        self.state.borrow_mut().request_plan = Some((uri.clone(), owned_req));
 
         self.connect()?;
         self.run().await?;
+
+        if let Some(err_message) = self.state.borrow().error.clone() {
+            return Err(err_message.into());
+        }
 
         Ok(self.build_response())
     }
@@ -428,8 +436,7 @@ impl Client {
     fn connect(&mut self) -> AnyError<()> {
         let (uri, _) = self
             .state
-            .lock()
-            .unwrap()
+            .borrow_mut()
             .request_plan
             .clone()
             .ok_or_else(|| "no request".to_string())?;
@@ -462,14 +469,39 @@ impl Client {
         loop {
             self.endpoint.process_connections()?;
 
-            if self.state.lock().unwrap().finished {
+            if self.state.borrow().finished {
                 break;
             }
 
             self.read_socket()?;
+
+            if let Some(wait) = self.endpoint.timeout() {
+                let max_sleep_duration = Duration::from_millis(5);
+
+                let sleep_duration = if wait > max_sleep_duration {
+                    max_sleep_duration
+                } else {
+                    wait
+                };
+
+                if !sleep_duration.is_zero() {
+                    std::thread::sleep(sleep_duration);
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+
             self.endpoint.on_timeout(Instant::now());
 
             if Instant::now().duration_since(start).as_secs() > 60 {
+                let mut state_mut = self.state.borrow_mut();
+
+                if state_mut.error.is_none() {
+                    state_mut.error = Some("request timeout".to_string());
+                }
+
+                state_mut.finished = true;
+
                 break;
             }
         }
@@ -522,7 +554,7 @@ impl Client {
     }
 
     fn build_response(&self) -> Response {
-        let snapshot = self.state.lock().unwrap();
+        let snapshot = self.state.borrow();
         let status = snapshot.response_status.unwrap_or(0);
         let status_text = status_text(status).to_string();
         let mut header_map: BTreeMap<String, Value> = BTreeMap::new();
@@ -565,11 +597,11 @@ impl Client {
 }
 
 struct ClientHandler {
-    state: Arc<Mutex<InternalState>>,
+    state: Rc<RefCell<InternalState>>,
 }
 
 impl ClientHandler {
-    fn new(state: Arc<Mutex<InternalState>>) -> Self {
+    fn new(state: Rc<RefCell<InternalState>>) -> Self {
         Self { state }
     }
 }
@@ -577,7 +609,35 @@ impl ClientHandler {
 impl TransportHandler for ClientHandler {
     fn on_conn_created(&mut self, _: &mut Connection) {}
 
-    fn on_conn_closed(&mut self, _: &mut Connection) {}
+    fn on_conn_closed(&mut self, conn: &mut Connection) {
+        let mut state = self.state.borrow_mut();
+
+        if let Some(local_err) = conn.local_error() {
+            if !local_err.is_app {
+                state.error = Some(format!(
+                    "local error: code={}, reason={}",
+                    local_err.error_code,
+                    String::from_utf8_lossy(&local_err.reason)
+                ));
+            }
+        } else if let Some(peer_err) = conn.peer_error() {
+            state.error = Some(format!(
+                "peer error: code={}, reason={}",
+                peer_err.error_code,
+                String::from_utf8_lossy(&peer_err.reason)
+            ));
+        } else if conn.is_handshake_timeout() {
+            state.error = Some("handshake timeout".to_string());
+        } else if conn.is_idle_timeout() {
+            state.error = Some("idle timeout".to_string());
+        } else if conn.is_reset() {
+            state.error = Some("stateless reset".to_string());
+        } else if state.error.is_none() {
+            state.error = Some("connection closed".to_string());
+        }
+
+        state.finished = true;
+    }
 
     fn on_stream_created(&mut self, _: &mut Connection, _stream_id: u64) {}
 
@@ -588,14 +648,14 @@ impl TransportHandler for ClientHandler {
     fn on_new_token(&mut self, _: &mut Connection, _token: Vec<u8>) {}
 
     fn on_conn_established(&mut self, connection: &mut Connection) {
-        let need_initialize = self.state.lock().unwrap().http3.is_none();
+        let need_initialize = self.state.borrow().http3.is_none();
 
         if need_initialize && let Ok(h3_config) = Http3Config::new() {
-            self.state.lock().unwrap().http3 =
+            self.state.borrow_mut().http3 =
                 Http3Connection::new_with_quic_conn(connection, &h3_config).ok();
         }
 
-        let request_option = self.state.lock().unwrap().request_plan.clone();
+        let request_option = self.state.borrow().request_plan.clone();
 
         if request_option.is_none() {
             return;
@@ -604,7 +664,7 @@ impl TransportHandler for ClientHandler {
         let (uri, request) = request_option.unwrap();
         let header_list = build_headers(&uri, &request);
         let stream_id_option = {
-            let mut state_mut = self.state.lock().unwrap();
+            let mut state_mut = self.state.borrow_mut();
 
             state_mut
                 .http3
@@ -623,7 +683,7 @@ impl TransportHandler for ClientHandler {
             .map(|body_bytes| !body_bytes.is_empty())
             .unwrap_or(false);
         {
-            let mut state_mut = self.state.lock().unwrap();
+            let mut state_mut = self.state.borrow_mut();
 
             if let Some(http3) = state_mut.http3.as_mut() {
                 let _ = http3.send_headers(connection, stream_id, &header_list, !has_body);
@@ -633,7 +693,7 @@ impl TransportHandler for ClientHandler {
         if let Some(body_bytes) = request.body
             && !body_bytes.is_empty()
         {
-            let mut state_mut = self.state.lock().unwrap();
+            let mut state_mut = self.state.borrow_mut();
 
             if let Some(http3) = state_mut.http3.as_mut() {
                 let _ = http3.send_body(
@@ -650,7 +710,7 @@ impl TransportHandler for ClientHandler {
         let mut buffer_bytes = vec![0u8; 65536];
         loop {
             let event = {
-                let mut state_mut = self.state.lock().unwrap();
+                let mut state_mut = self.state.borrow_mut();
 
                 match state_mut.http3.as_mut() {
                     Some(http3) => http3.poll(connection),
@@ -660,7 +720,7 @@ impl TransportHandler for ClientHandler {
 
             match event {
                 Ok((_, Http3Event::Headers { headers, .. })) => {
-                    let mut state = self.state.lock().unwrap();
+                    let mut state = self.state.borrow_mut();
                     for header in headers {
                         if header.name().eq_ignore_ascii_case(b":status")
                             && let Ok(status_text_str) = std::str::from_utf8(header.value())
@@ -673,47 +733,59 @@ impl TransportHandler for ClientHandler {
                     }
                 }
 
-                Ok((stream_id, Http3Event::Data)) => {
+                Ok((stream_id, Http3Event::Data)) => loop {
                     let read_result = {
-                        let mut state_mut = self.state.lock().unwrap();
+                        let mut state_mut = self.state.borrow_mut();
 
                         if let Some(http3) = state_mut.http3.as_mut() {
-                            http3
-                                .recv_body(connection, stream_id, &mut buffer_bytes)
-                                .ok()
+                            match http3.recv_body(connection, stream_id, &mut buffer_bytes) {
+                                Ok(len) => Some(Ok(len)),
+                                Err(Http3Error::Done) => Some(Err(Http3Error::Done)),
+                                Err(e) => Some(Err(e)),
+                            }
                         } else {
                             None
                         }
                     };
 
-                    if let Some(read_length) = read_result {
-                        if read_length == 0 {
+                    match read_result {
+                        Some(Ok(read_length)) => {
+                            if read_length == 0 {
+                                break;
+                            }
+
+                            let mut state_mut = self.state.borrow_mut();
+                            state_mut
+                                .response_body
+                                .extend_from_slice(&buffer_bytes[..read_length]);
+
                             continue;
                         }
 
-                        let mut state_mut = self.state.lock().unwrap();
-                        state_mut
-                            .response_body
-                            .extend_from_slice(&buffer_bytes[..read_length]);
+                        Some(Err(Http3Error::Done)) | None => break,
+
+                        Some(Err(_)) => {
+                            break;
+                        }
                     }
-                }
+                },
 
                 Ok((_, Http3Event::Finished)) => {
-                    self.state.lock().unwrap().finished = true;
+                    self.state.borrow_mut().finished = true;
                     let _ = connection.close(true, 0x00, b"ok");
 
                     return;
                 }
 
                 Ok((_, Http3Event::Reset(_))) => {
-                    self.state.lock().unwrap().finished = true;
+                    self.state.borrow_mut().finished = true;
                     let _ = connection.close(true, 0x00, b"reset");
 
                     return;
                 }
 
                 Ok((_, Http3Event::GoAway)) => {
-                    self.state.lock().unwrap().finished = true;
+                    self.state.borrow_mut().finished = true;
                     let _ = connection.close(true, 0x00, b"goaway");
 
                     return;
@@ -724,7 +796,7 @@ impl TransportHandler for ClientHandler {
                 Err(Http3Error::Done) => return,
 
                 Err(_) => {
-                    self.state.lock().unwrap().finished = true;
+                    self.state.borrow_mut().finished = true;
                     let _ = connection.close(true, 0x00, b"err");
 
                     return;

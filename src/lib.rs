@@ -155,8 +155,8 @@ const CONNECTION_WINDOW_FACTOR: f64 = 1.5;
 /// for TCP's initial RTO
 const INITIAL_RTT: Duration = Duration::from_millis(333);
 
-/// Default handshake timeout is 30 seconds.
-const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default handshake timeout is 10 seconds.
+const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 ///  Default linear factor for calculating the probe timeout.
 const DEFAULT_PTO_LINEAR_FACTOR: u64 = 0;
