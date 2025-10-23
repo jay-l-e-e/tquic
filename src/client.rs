@@ -127,6 +127,7 @@ impl RequestOptions<String, String> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Response {
     pub status: u16,
     pub status_text: String,
