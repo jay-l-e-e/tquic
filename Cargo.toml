@@ -15,7 +15,6 @@ include = [
     "/*.toml",
     "/LICENSE",
     "/src",
-    "/benches",
     "/include",
     "/deps/boringssl/**/*.[chS]",
     "/deps/boringssl/**/*.asm",
@@ -27,48 +26,71 @@ include = [
 
 [package.metadata.docs.rs]
 no-default-features = true
-features = ["qlog", "h3"]
+features = ["qlog"]
 
 [features]
-default = ["qlog", "h3"]
+default = ["qlog"]
 
 # build the FFI API
 ffi = []
 
 # enable support for the qlog
-qlog = ["dep:serde", "dep:serde_json", "dep:serde_derive", "dep:serde_with"]
+qlog = ["dep:serde", "dep:serde_derive", "dep:serde_with"]
 
-# enable support for h3
-h3 = ["dep:sfv"]
-
-[dependencies]
-env_logger = "0.11"
-url = "2.5"
-mio = { version = "1", features = ["net", "os-poll"] }
+[workspace.dependencies]
+brotli = "8.0"
 bytes = "1"
-rustc-hash = "2"
-slab = "0.4"
 enumflags2 = "0.7"
-ring = "0.17"
-libc = "0.2"
+env_logger = "0.11"
+flate2 = "1.1"
+futures = "0.3"
+hex = "0.4"
 lazy_static = "1"
+libc = "0.2"
 log = { version = "0.4", features = ["std"] }
+lru = "0.16"
+mio = { version = "1", features = ["net", "os-poll"] }
+priority-queue = "2.7"
+rand = "0.9"
+ring = "0.17"
+rustc-hash = "2"
+serde_json = { version = "1.0", features = ["preserve_order"] }
+sfv = "0.14"
+slab = "0.4"
+smallvec = { version = "1.15", features = ["serde", "union"] }
 strum = "0.27"
 strum_macros = "0.27"
-rand = "0.9"
-smallvec = { version = "1.15", features = ["serde", "union"] }
-lru = "0.16"
-serde = { version = "1.0", features = ["derive"], optional=true }
-serde_json = { version = "1.0", features = ["preserve_order"], optional=true }
-serde_derive = { version = "1.0", optional=true }
-serde_with = { version="3.14", optional=true }
-hex = "0.4"
-priority-queue = "2.7"
-sfv = { version = "0.14", optional=true }
-flate2 = { version = "1.1" }
-brotli = { version = "8.0" }
-zstd = { version = "0.13" }
-futures = { version = "0.3" }
+url = "2.5"
+zstd = "0.13"
+
+[dependencies]
+brotli.workspace = true
+bytes.workspace = true
+enumflags2.workspace = true
+env_logger.workspace = true
+flate2.workspace = true
+futures.workspace = true
+hex.workspace = true
+lazy_static.workspace = true
+libc.workspace = true
+log.workspace = true
+lru.workspace = true
+mio.workspace = true
+priority-queue.workspace = true
+rand.workspace = true
+ring.workspace = true
+rustc-hash.workspace = true
+serde_json.workspace = true
+sfv.workspace = true
+slab.workspace = true
+smallvec.workspace = true
+strum.workspace = true
+strum_macros.workspace = true
+url.workspace = true
+zstd.workspace = true
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde_derive = { version = "1.0", optional = true }
+serde_with = { version="3.14", optional = true }
 
 [target."cfg(windows)".dependencies]
 winapi = { version = "0.3", features = ["wincrypt", "ws2def", "ws2ipdef", "ws2tcpip"] }

@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use mio::net::UdpSocket;
-use serde_json::Value;
+use serde_json::{Value, json};
 use url::Url;
 
 use crate::PacketSendHandler;
@@ -860,8 +860,6 @@ fn bind_udp(local: SocketAddr) -> AnyError<UdpSocket> {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use super::*;
     use std::io::Write;
 

@@ -1321,7 +1321,6 @@ mod multipath_scheduler;
 #[path = "tls/tls.rs"]
 mod tls;
 
-#[cfg(feature = "h3")]
 #[path = "h3/h3.rs"]
 pub mod h3;
 
