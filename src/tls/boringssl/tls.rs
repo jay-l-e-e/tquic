@@ -455,15 +455,15 @@ impl Session {
         const TLS1_3_VERSION: u16 = 0x0304;
         const SSL_GROUP_X25519_MLKEM768: u16 = 0x11ec;
 
+        self.set_quic_method()?;
+        self.set_quic_early_data_context(b"quic")?;
+        self.set_quiet_shutdown(true);
         self.set_min_proto_version(TLS1_3_VERSION);
         self.set_max_proto_version(TLS1_3_VERSION);
         self.set_renegotiate_mode(SslRenegotiateMode::ssl_renegotiate_explicit);
         self.set_shed_handshake_config(true);
         self.set_encrypted_client_hello(true);
         self.set_permute_extensions(true);
-        self.set_quic_method()?;
-        self.set_quic_early_data_context(b"quic")?;
-        self.set_quiet_shutdown(true);
         self.set_alps_use_new_codepoint(true);
         self.set_curves("X25519MLKEM768:X25519:P-256:P-384")?;
 

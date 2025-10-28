@@ -1603,10 +1603,11 @@ impl Connection {
         if pkt_type != PacketType::OneRTT {
             pkt_num_offset += crate::LENGTH_FIELD_LEN; // Reserved for Packet length field
         }
-        let crypto_overhead = self
-            .tls_session
-            .get_overhead(level)
-            .ok_or(Error::InternalError)?;
+        let crypto_overhead = match self.tls_session.get_overhead(level) {
+            Some(v) => v,
+            // Keys for this level are not ready yet – nothing to send now.
+            None => return Err(Error::Done),
+        };
         let total_overhead = if !self.is_encryption_disabled(hdr.pkt_type) {
             pkt_num_offset + pkt_num_len + crypto_overhead
         } else {
@@ -1673,7 +1674,8 @@ impl Connection {
         let key = self.tls_session.get_keys(pkt_type.to_level()?);
         let key = match &key.seal {
             Some(seal) => seal,
-            None => return Err(Error::InternalError),
+            // Seal key not ready; defer sending for now.
+            None => return Err(Error::Done),
         };
         let mut cid_seq = None;
         if self.flags.contains(EnableMultipath) {
