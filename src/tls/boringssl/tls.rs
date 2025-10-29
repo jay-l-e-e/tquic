@@ -468,9 +468,9 @@ impl Session {
         self.set_curves("X25519MLKEM768:X25519:P-256:P-384")?;
 
         self.set_group_ids(&[SSL_GROUP_X25519_MLKEM768, 29, 23, 24])?;
-        self.set_client_key_shares(&[SSL_GROUP_X25519_MLKEM768, 29, 23, 24])?;
+        self.set_client_key_shares(&[SSL_GROUP_X25519_MLKEM768, 29])?;
         self.add_application_settings(b"h3", &[])?;
-        self.set_sigalgs("ECDSA+SHA256:RSA-PSS+SHA256:RSA+SHA256:ECDSA+SHA384:RSA-PSS+SHA384:RSA+SHA384:RSA-PSS+SHA512:RSA+SHA512")?;
+        self.set_sigalgs("ECDSA+SHA256:RSA-PSS+SHA256:RSA+SHA256:ECDSA+SHA384:RSA-PSS+SHA384:RSA+SHA384:RSA-PSS+SHA512:RSA+SHA512:RSA+SHA1")?;
 
         Ok(())
     }
