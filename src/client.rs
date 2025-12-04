@@ -238,6 +238,8 @@ struct InternalState {
     response_body: Vec<u8>,
     response_status: Option<u16>,
     finished: bool,
+    connection_ready: bool,
+    active_stream_id: Option<u64>,
     http3: Option<Http3Connection>,
     error: Option<String>,
     session_cache: Option<Vec<u8>>,
@@ -252,6 +254,8 @@ impl InternalState {
             response_body: vec![],
             response_status: None,
             finished: false,
+            connection_ready: false,
+            active_stream_id: None,
             http3: None,
             error: None,
             session_cache: None,
@@ -274,7 +278,7 @@ impl Client {
 
         let mut config = Config::new()?;
 
-        config.set_omit_client_initial_scid(false);
+        config.set_omit_client_initial_scid(true);
         config.enable_stateless_reset(!protocol_options.disable_stateless_reset);
 
         if let Some(value) = protocol_options.handshake_timeout {
@@ -426,7 +430,7 @@ impl Client {
             body: request.body,
         };
 
-        {
+        let should_reconnect = {
             let mut state = self.state.borrow_mut();
 
             state.response_headers.clear();
@@ -435,12 +439,24 @@ impl Client {
             state.error = None;
             state.finished = false;
 
-            state.http3 = None;
+            let needs_new_connection =
+                state.current_connection_index.is_none() || !state.connection_ready;
 
+            if needs_new_connection {
+                state.http3 = None;
+                state.connection_ready = false;
+            }
+
+            state.active_stream_id = None;
             state.request_plan = Some((uri.clone(), owned_req));
+
+            needs_new_connection
+        };
+
+        if should_reconnect {
+            self.connect()?;
         }
 
-        self.connect()?;
         self.run().await?;
 
         if let Some(err_message) = self.state.borrow().error.clone() {
@@ -487,6 +503,96 @@ impl Client {
         )?;
 
         self.state.borrow_mut().current_connection_index = Some(connection_index);
+        self.state.borrow_mut().connection_ready = false;
+
+        Ok(())
+    }
+
+    fn ensure_request_stream(&mut self) -> AnyError<()> {
+        let (connection_idx, uri, request) = {
+            let mut state = self.state.borrow_mut();
+
+            if !state.connection_ready || state.active_stream_id.is_some() {
+                return Ok(());
+            }
+
+            let Some(plan) = state.request_plan.take() else {
+                return Ok(());
+            };
+
+            let Some(idx) = state.current_connection_index else {
+                state.request_plan = Some(plan);
+                return Ok(());
+            };
+
+            (idx, plan.0, plan.1)
+        };
+
+        self.start_request_on_connection(connection_idx, uri, request)
+    }
+
+    fn start_request_on_connection(
+        &mut self,
+        connection_idx: u64,
+        uri: Url,
+        request: RequestOptions<String, String>,
+    ) -> AnyError<()> {
+        let state_handle = self.state.clone();
+        self.endpoint
+            .with_connection_mut(connection_idx, |connection| {
+                {
+                    let mut state_mut = state_handle.borrow_mut();
+                    if state_mut.http3.is_none() {
+                        if let Ok(h3_config) = Http3Config::new() {
+                            state_mut.http3 =
+                                Http3Connection::new_with_quic_conn(connection, &h3_config).ok();
+                        }
+                    }
+                }
+
+                let mut state_mut = state_handle.borrow_mut();
+
+                let Some(http3) = state_mut.http3.as_mut() else {
+                    state_mut.error = Some("failed to initialize http3".to_string());
+                    state_mut.finished = true;
+
+                    return;
+                };
+
+                let Ok(stream_id) = http3.stream_new(connection) else {
+                    state_mut.error = Some("failed to open HTTP/3 stream".to_string());
+                    state_mut.finished = true;
+
+                    return;
+                };
+
+                let headers = build_headers(&uri, &request);
+                let has_body = request
+                    .body
+                    .as_ref()
+                    .map(|body_bytes| !body_bytes.is_empty())
+                    .unwrap_or(false);
+
+                if let Err(err) = http3.send_headers(connection, stream_id, &headers, !has_body) {
+                    state_mut.error = Some(format!("failed to send headers: {err:?}"));
+                    state_mut.finished = true;
+
+                    return;
+                }
+
+                if let Some(body_bytes) = request.body {
+                    if let Err(err) =
+                        http3.send_body(connection, stream_id, Bytes::from(body_bytes), true)
+                    {
+                        state_mut.error = Some(format!("failed to send body: {err:?}"));
+                        state_mut.finished = true;
+
+                        return;
+                    }
+                }
+
+                state_mut.active_stream_id = Some(stream_id);
+            })?;
 
         Ok(())
     }
@@ -494,13 +600,21 @@ impl Client {
     async fn run(&mut self) -> AnyError<()> {
         let start = Instant::now();
         loop {
+            self.ensure_request_stream()?;
             self.endpoint.process_connections()?;
+            self.ensure_request_stream()?;
 
             if self.state.borrow().finished {
                 break;
             }
 
             self.read_socket()?;
+            self.endpoint.process_connections()?;
+            self.ensure_request_stream()?;
+
+            if self.state.borrow().finished {
+                break;
+            }
 
             if let Some(wait) = self.endpoint.timeout() {
                 let max_sleep_duration = Duration::from_millis(5);
@@ -519,6 +633,11 @@ impl Client {
             }
 
             self.endpoint.on_timeout(Instant::now());
+
+            self.ensure_request_stream()?;
+            if self.state.borrow().finished {
+                break;
+            }
 
             if Instant::now().duration_since(start).as_secs() > 60 {
                 let mut state_mut = self.state.borrow_mut();
@@ -631,6 +750,22 @@ impl ClientHandler {
     fn new(state: Rc<RefCell<InternalState>>) -> Self {
         Self { state }
     }
+
+    fn ensure_http3_initialized(&self, connection: &mut Connection) {
+        let need_initialize = {
+            let state_ref = self.state.borrow();
+            state_ref.http3.is_none()
+        };
+
+        if !need_initialize {
+            return;
+        }
+
+        if let Ok(h3_config) = Http3Config::new() {
+            self.state.borrow_mut().http3 =
+                Http3Connection::new_with_quic_conn(connection, &h3_config).ok();
+        }
+    }
 }
 
 impl TransportHandler for ClientHandler {
@@ -645,61 +780,8 @@ impl TransportHandler for ClientHandler {
             return;
         }
 
-        let need_initialize = self.state.borrow().http3.is_none();
-        if need_initialize && let Ok(h3_config) = Http3Config::new() {
-            self.state.borrow_mut().http3 =
-                Http3Connection::new_with_quic_conn(connection, &h3_config).ok();
-        }
-
-        let request_option = self.state.borrow().request_plan.clone();
-        if request_option.is_none() {
-            return;
-        }
-
-        let (uri, request) = request_option.unwrap();
-        let header_list = build_headers(&uri, &request);
-
-        let stream_id_option = {
-            let mut state_mut = self.state.borrow_mut();
-
-            state_mut
-                .http3
-                .as_mut()
-                .and_then(|http3| http3.stream_new(connection).ok())
-        };
-
-        if stream_id_option.is_none() {
-            return;
-        }
-
-        let stream_id = stream_id_option.unwrap();
-        let has_body = request
-            .body
-            .as_ref()
-            .map(|body_bytes| !body_bytes.is_empty())
-            .unwrap_or(false);
-        {
-            let mut state_mut = self.state.borrow_mut();
-
-            if let Some(http3) = state_mut.http3.as_mut() {
-                let _ = http3.send_headers(connection, stream_id, &header_list, !has_body);
-            }
-        }
-
-        if let Some(body_bytes) = request.body
-            && !body_bytes.is_empty()
-        {
-            let mut state_mut = self.state.borrow_mut();
-
-            if let Some(http3) = state_mut.http3.as_mut() {
-                let _ = http3.send_body(
-                    connection,
-                    stream_id,
-                    Bytes::copy_from_slice(&body_bytes),
-                    true,
-                );
-            }
-        }
+        self.ensure_http3_initialized(connection);
+        self.state.borrow_mut().connection_ready = true;
     }
 
     fn on_conn_closed(&mut self, conn: &mut Connection) {
@@ -710,6 +792,9 @@ impl TransportHandler for ClientHandler {
         }
 
         let mut state = self.state.borrow_mut();
+        state.connection_ready = false;
+        state.active_stream_id = None;
+        state.current_connection_index = None;
 
         if state.session_cache.is_none() {
             if let Some(buf) = conn.session() {
@@ -759,62 +844,8 @@ impl TransportHandler for ClientHandler {
             }
         }
 
-        let need_initialize = self.state.borrow().http3.is_none();
-
-        if need_initialize && let Ok(h3_config) = Http3Config::new() {
-            self.state.borrow_mut().http3 =
-                Http3Connection::new_with_quic_conn(connection, &h3_config).ok();
-        }
-
-        let request_option = self.state.borrow().request_plan.clone();
-
-        if request_option.is_none() {
-            return;
-        }
-
-        let (uri, request) = request_option.unwrap();
-        let header_list = build_headers(&uri, &request);
-        let stream_id_option = {
-            let mut state_mut = self.state.borrow_mut();
-
-            state_mut
-                .http3
-                .as_mut()
-                .and_then(|http3| http3.stream_new(connection).ok())
-        };
-
-        if stream_id_option.is_none() {
-            return;
-        }
-
-        let stream_id = stream_id_option.unwrap();
-        let has_body = request
-            .body
-            .as_ref()
-            .map(|body_bytes| !body_bytes.is_empty())
-            .unwrap_or(false);
-        {
-            let mut state_mut = self.state.borrow_mut();
-
-            if let Some(http3) = state_mut.http3.as_mut() {
-                let _ = http3.send_headers(connection, stream_id, &header_list, !has_body);
-            }
-        }
-
-        if let Some(body_bytes) = request.body
-            && !body_bytes.is_empty()
-        {
-            let mut state_mut = self.state.borrow_mut();
-
-            if let Some(http3) = state_mut.http3.as_mut() {
-                let _ = http3.send_body(
-                    connection,
-                    stream_id,
-                    Bytes::copy_from_slice(&body_bytes),
-                    true,
-                );
-            }
-        }
+        self.ensure_http3_initialized(connection);
+        self.state.borrow_mut().connection_ready = true;
     }
 
     fn on_stream_readable(&mut self, connection: &mut Connection, _stream_id: u64) {
@@ -888,26 +919,43 @@ impl TransportHandler for ClientHandler {
                     }
                 },
 
-                Ok((_, Http3Event::Finished)) => {
+                Ok((stream_id, Http3Event::Finished)) => {
                     if let Some(buf) = connection.session() {
                         self.state.borrow_mut().session_cache = Some(buf.to_vec());
                     }
 
-                    self.state.borrow_mut().finished = true;
-                    let _ = connection.close(true, 0x00, b"ok");
+                    {
+                        let mut state_mut = self.state.borrow_mut();
+                        if state_mut.active_stream_id == Some(stream_id) {
+                            state_mut.active_stream_id = None;
+                        }
+                        state_mut.finished = true;
+                    }
 
                     return;
                 }
 
-                Ok((_, Http3Event::Reset(_))) => {
-                    self.state.borrow_mut().finished = true;
+                Ok((stream_id, Http3Event::Reset(_))) => {
+                    {
+                        let mut state_mut = self.state.borrow_mut();
+                        if state_mut.active_stream_id == Some(stream_id) {
+                            state_mut.active_stream_id = None;
+                        }
+                        state_mut.finished = true;
+                    }
                     let _ = connection.close(true, 0x00, b"reset");
 
                     return;
                 }
 
-                Ok((_, Http3Event::GoAway)) => {
-                    self.state.borrow_mut().finished = true;
+                Ok((stream_id, Http3Event::GoAway)) => {
+                    {
+                        let mut state_mut = self.state.borrow_mut();
+                        if state_mut.active_stream_id == Some(stream_id) {
+                            state_mut.active_stream_id = None;
+                        }
+                        state_mut.finished = true;
+                    }
                     let _ = connection.close(true, 0x00, b"goaway");
 
                     return;
@@ -918,7 +966,11 @@ impl TransportHandler for ClientHandler {
                 Err(Http3Error::Done) => return,
 
                 Err(_) => {
-                    self.state.borrow_mut().finished = true;
+                    {
+                        let mut state_mut = self.state.borrow_mut();
+                        state_mut.active_stream_id = None;
+                        state_mut.finished = true;
+                    }
                     let _ = connection.close(true, 0x00, b"err");
 
                     return;

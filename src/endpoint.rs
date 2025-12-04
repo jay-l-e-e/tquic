@@ -199,6 +199,19 @@ impl Endpoint {
         }
     }
 
+    /// Execute a closure with mutable access to an active connection.
+    pub fn with_connection_mut<F, R>(&mut self, idx: u64, f: F) -> Result<R>
+    where
+        F: FnOnce(&mut Connection) -> R,
+    {
+        let conn = self
+            .conns
+            .get_mut(idx)
+            .ok_or(Error::InvalidOperation("connection not found".into()))?;
+
+        Ok(f(conn))
+    }
+
     /// Process an incoming UDP datagram.
     ///
     /// Incoming packets are classified on receipt. Packets can either be
