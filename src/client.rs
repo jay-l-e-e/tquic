@@ -49,6 +49,7 @@ pub struct ClientProtocolOptions {
     pub cid_len: Option<usize>,
     pub send_batch_size: Option<usize>,
     pub disable_encryption: Option<bool>,
+    pub root_certificates: Option<String>,
 }
 
 impl Default for ClientProtocolOptions {
@@ -82,6 +83,7 @@ impl Default for ClientProtocolOptions {
             cid_len: Some(8),
             send_batch_size: Some(1),
             disable_encryption: None,
+            root_certificates: None,
         }
     }
 }
@@ -244,6 +246,7 @@ struct InternalState {
     error: Option<String>,
     session_cache: Option<Vec<u8>>,
     current_connection_index: Option<u64>,
+    pending_body: Option<Bytes>,
 }
 
 impl InternalState {
@@ -260,6 +263,42 @@ impl InternalState {
             error: None,
             session_cache: None,
             current_connection_index: None,
+            pending_body: None,
+        }
+    }
+
+    fn fail(&mut self, reason: String) {
+        self.error.get_or_insert(reason);
+        self.finished = true;
+    }
+
+    fn flush_pending_body(&mut self, connection: &mut Connection, stream_id: u64) {
+        while let Some(body) = self.pending_body.take() {
+            let Some(http3) = self.http3.as_mut() else {
+                self.pending_body = Some(body);
+
+                return;
+            };
+
+            match http3.send_body(connection, stream_id, body.clone(), true) {
+                Ok(written) if written >= body.len() => return,
+
+                Ok(written) => self.pending_body = Some(body.slice(written..)),
+
+                Err(Http3Error::NoError) => self.pending_body = Some(body),
+
+                Err(Http3Error::Done) => {
+                    self.pending_body = Some(body);
+
+                    return;
+                }
+
+                Err(error) => {
+                    self.fail(format!("failed to send body: {error:?}"));
+
+                    return;
+                }
+            }
         }
     }
 }
@@ -382,6 +421,12 @@ impl Client {
             protocol_options.enable_early_data,
         )?;
 
+        tls.set_verify(true);
+
+        if let Some(root_certificates) = protocol_options.root_certificates.as_deref() {
+            tls.set_ca_certs(root_certificates)?;
+        }
+
         if !protocol_options.certificate_compression.is_empty() {
             tls.enable_certificate_compression(protocol_options.certificate_compression.clone())?;
         }
@@ -438,6 +483,7 @@ impl Client {
             state.response_status = None;
             state.error = None;
             state.finished = false;
+            state.pending_body = None;
 
             let needs_new_connection =
                 state.current_connection_index.is_none() || !state.connection_ready;
@@ -580,18 +626,12 @@ impl Client {
                     return;
                 }
 
-                if let Some(body_bytes) = request.body {
-                    if let Err(err) =
-                        http3.send_body(connection, stream_id, Bytes::from(body_bytes), true)
-                    {
-                        state_mut.error = Some(format!("failed to send body: {err:?}"));
-                        state_mut.finished = true;
-
-                        return;
-                    }
-                }
-
                 state_mut.active_stream_id = Some(stream_id);
+
+                if has_body {
+                    state_mut.pending_body = request.body.map(Bytes::from);
+                    state_mut.flush_pending_body(connection, stream_id);
+                }
             })?;
 
         Ok(())
@@ -831,7 +871,15 @@ impl TransportHandler for ClientHandler {
 
     fn on_stream_created(&mut self, _: &mut Connection, _stream_id: u64) {}
 
-    fn on_stream_writable(&mut self, _: &mut Connection, _stream_id: u64) {}
+    fn on_stream_writable(&mut self, connection: &mut Connection, stream_id: u64) {
+        let mut state = self.state.borrow_mut();
+
+        if state.active_stream_id == Some(stream_id)
+            && state.current_connection_index == connection.index()
+        {
+            state.flush_pending_body(connection, stream_id);
+        }
+    }
 
     fn on_stream_closed(&mut self, _: &mut Connection, _stream_id: u64) {}
 
@@ -941,7 +989,7 @@ impl TransportHandler for ClientHandler {
                         if state_mut.active_stream_id == Some(stream_id) {
                             state_mut.active_stream_id = None;
                         }
-                        state_mut.finished = true;
+                        state_mut.fail("stream reset".to_string());
                     }
                     let _ = connection.close(true, 0x00, b"reset");
 
@@ -954,7 +1002,7 @@ impl TransportHandler for ClientHandler {
                         if state_mut.active_stream_id == Some(stream_id) {
                             state_mut.active_stream_id = None;
                         }
-                        state_mut.finished = true;
+                        state_mut.fail("goaway".to_string());
                     }
                     let _ = connection.close(true, 0x00, b"goaway");
 
@@ -965,11 +1013,11 @@ impl TransportHandler for ClientHandler {
 
                 Err(Http3Error::Done) => return,
 
-                Err(_) => {
+                Err(error) => {
                     {
                         let mut state_mut = self.state.borrow_mut();
                         state_mut.active_stream_id = None;
-                        state_mut.finished = true;
+                        state_mut.fail(format!("http3 error: {error:?}"));
                     }
                     let _ = connection.close(true, 0x00, b"err");
 
@@ -1342,5 +1390,207 @@ mod tests {
         assert!(address.is_ipv6());
         assert_eq!(address.ip(), Ipv6Addr::LOCALHOST);
         assert_eq!(address.port(), 443);
+    }
+}
+
+#[cfg(test)]
+mod loopback_tests {
+    use super::*;
+    use bytes::Buf;
+    use std::io::Write;
+
+    struct Loopback {
+        address: SocketAddr,
+        roots: tempfile::NamedTempFile,
+        _runtime: tokio::runtime::Runtime,
+    }
+
+    fn serve_loopback(stream_window: u32) -> Loopback {
+        let certified = rcgen::generate_simple_self_signed(vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+        ])
+        .unwrap();
+        let mut roots = tempfile::NamedTempFile::new().unwrap();
+
+        roots.write_all(certified.cert.pem().as_bytes()).unwrap();
+        roots.flush().unwrap();
+
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der());
+        let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![certified.cert.der().clone()], key.into())
+        .unwrap();
+
+        tls.alpn_protocols = vec![b"h3".to_vec()];
+
+        let mut server = quinn::ServerConfig::with_crypto(Arc::new(
+            quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap(),
+        ));
+        let mut transport = quinn::TransportConfig::default();
+
+        transport.stream_receive_window(quinn::VarInt::from_u32(stream_window));
+        server.transport_config(Arc::new(transport));
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let endpoint = {
+            let _entered = runtime.enter();
+
+            quinn::Endpoint::server(server, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+                .unwrap()
+        };
+        let address = endpoint.local_addr().unwrap();
+
+        runtime.spawn(serve_connections(endpoint));
+
+        Loopback {
+            address,
+            roots,
+            _runtime: runtime,
+        }
+    }
+
+    async fn serve_connections(endpoint: quinn::Endpoint) {
+        while let Some(incoming) = endpoint.accept().await {
+            tokio::spawn(async move {
+                let Ok(connection) = incoming.await else {
+                    return;
+                };
+                let Ok(mut http3) =
+                    h3::server::Connection::<_, Bytes>::new(h3_quinn::Connection::new(connection))
+                        .await
+                else {
+                    return;
+                };
+
+                while let Ok(Some(resolver)) = http3.accept().await {
+                    tokio::spawn(async move {
+                        if let Ok((request, stream)) = resolver.resolve_request().await {
+                            answer_request(request, stream).await;
+                        }
+                    });
+                }
+            });
+        }
+    }
+
+    async fn answer_request(
+        request: http::Request<()>,
+        mut stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    ) {
+        let mut received = 0;
+
+        while let Ok(Some(chunk)) = stream.recv_data().await {
+            received += chunk.remaining();
+        }
+
+        if request.uri().path() == "/reset" {
+            stream.stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
+
+            return;
+        }
+
+        let response = http::Response::builder().status(200).body(()).unwrap();
+
+        if stream.send_response(response).await.is_ok() {
+            let _ = stream.send_data(Bytes::from(received.to_string())).await;
+            let _ = stream.finish().await;
+        }
+    }
+
+    fn request_loopback(
+        client: &mut Client,
+        loopback: &Loopback,
+        path: &str,
+        body: Option<Vec<u8>>,
+    ) -> AnyError<Response> {
+        let url = Url::parse(&format!(
+            "https://127.0.0.1:{}{path}",
+            loopback.address.port()
+        ))
+        .unwrap();
+        let options: RequestOptions<String, String> = RequestOptions {
+            method: if body.is_some() {
+                HttpMethod::Post
+            } else {
+                HttpMethod::Get
+            },
+            headers: None,
+            body,
+        };
+
+        futures::executor::block_on(client.request(&url, options))
+    }
+
+    fn build_trusting_client(loopback: &Loopback) -> Client {
+        Client::new(Some(ClientProtocolOptions {
+            root_certificates: Some(loopback.roots.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_certificate_a_given_root_signs_is_accepted() {
+        let loopback = serve_loopback(1 << 20);
+        let mut client = build_trusting_client(&loopback);
+        let response = request_loopback(&mut client, &loopback, "/", None).unwrap();
+
+        assert_eq!(
+            (response.status, response.body.as_slice()),
+            (200, b"0".as_slice()),
+            "a root the caller names is trusted beside the roots of the system"
+        );
+    }
+
+    #[test]
+    fn a_stream_the_peer_resets_is_a_failure_of_the_request() {
+        let loopback = serve_loopback(1 << 20);
+        let mut client = build_trusting_client(&loopback);
+        let outcome = request_loopback(&mut client, &loopback, "/reset", None);
+
+        assert!(
+            outcome.is_err(),
+            "a stream that is reset before its response arrived carries no answer; handed on as a response it has no status and an empty body, got {:?}",
+            outcome.map(|response| response.status)
+        );
+    }
+
+    #[test]
+    fn a_body_larger_than_the_window_of_its_stream_arrives_whole() {
+        let loopback = serve_loopback(16 * 1024);
+        let mut client = build_trusting_client(&loopback);
+        let body = vec![b'a'; 200_000];
+        let response = request_loopback(&mut client, &loopback, "/", Some(body)).unwrap();
+
+        assert_eq!(
+            (
+                response.status,
+                String::from_utf8_lossy(&response.body).into_owned()
+            ),
+            (200, "200000".to_string()),
+            "a request body is written as far as the flow control credit of its stream reaches, and the rest follows as the peer grants more; left where the first write stopped, the stream never ends and the server waits for a body its content length announced"
+        );
+    }
+
+    #[test]
+    fn a_certificate_no_trusted_root_signs_is_refused() {
+        let loopback = serve_loopback(1 << 20);
+        let mut client = Client::new(None).unwrap();
+        let outcome = request_loopback(&mut client, &loopback, "/", None);
+
+        assert!(
+            outcome.is_err(),
+            "a server whose certificate no trusted root signs is not talked to; a handshake that goes on past a failed verification hands the request, its session headers included, to whoever answers on the address, got {:?}",
+            outcome.map(|response| response.status)
+        );
     }
 }
