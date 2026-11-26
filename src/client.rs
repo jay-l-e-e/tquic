@@ -19,6 +19,32 @@ use crate::{Connection, PacketInfo, TlsConfig, TransportHandler};
 
 type AnyError<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestFailure {
+    Unprocessed(String),
+    Failed(String),
+    Oversized(usize),
+}
+
+impl std::fmt::Display for RequestFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RequestFailure::Unprocessed(reason) => {
+                write!(
+                    formatter,
+                    "the server did not process the request: {reason}"
+                )
+            }
+            RequestFailure::Failed(reason) => write!(formatter, "{reason}"),
+            RequestFailure::Oversized(limit) => {
+                write!(formatter, "the response body is larger than {limit} bytes")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RequestFailure {}
+
 #[derive(Clone)]
 pub struct ClientProtocolOptions {
     pub enable_early_data: bool,
@@ -50,6 +76,7 @@ pub struct ClientProtocolOptions {
     pub send_batch_size: Option<usize>,
     pub disable_encryption: Option<bool>,
     pub root_certificates: Option<String>,
+    pub response_body_limit: Option<usize>,
 }
 
 impl Default for ClientProtocolOptions {
@@ -84,6 +111,7 @@ impl Default for ClientProtocolOptions {
             send_batch_size: Some(1),
             disable_encryption: None,
             root_certificates: None,
+            response_body_limit: None,
         }
     }
 }
@@ -247,10 +275,15 @@ struct InternalState {
     session_cache: Option<Vec<u8>>,
     current_connection_index: Option<u64>,
     pending_body: Option<Bytes>,
+    request_sent: bool,
+    is_unprocessed: bool,
+    is_oversized: bool,
+    is_connection_draining: bool,
+    response_body_limit: Option<usize>,
 }
 
 impl InternalState {
-    fn new() -> Self {
+    fn new(response_body_limit: Option<usize>) -> Self {
         Self {
             request_plan: None,
             response_headers: vec![],
@@ -264,6 +297,19 @@ impl InternalState {
             session_cache: None,
             current_connection_index: None,
             pending_body: None,
+            request_sent: false,
+            is_unprocessed: false,
+            is_oversized: false,
+            is_connection_draining: false,
+            response_body_limit,
+        }
+    }
+
+    fn classify_failure(&self, reason: String) -> RequestFailure {
+        match self.response_body_limit {
+            Some(limit) if self.is_oversized => RequestFailure::Oversized(limit),
+            _ if self.is_unprocessed || !self.request_sent => RequestFailure::Unprocessed(reason),
+            _ => RequestFailure::Failed(reason),
         }
     }
 
@@ -437,7 +483,9 @@ impl Client {
         let local_v6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
         let socket_ipv4 = bind_udp(local_v4).ok().map(Arc::new);
         let socket_ipv6 = bind_udp(local_v6).ok().map(Arc::new);
-        let state = Rc::new(RefCell::new(InternalState::new()));
+        let state = Rc::new(RefCell::new(InternalState::new(
+            protocol_options.response_body_limit,
+        )));
         let handler = ClientHandler::new(state.clone());
         let sender = std::rc::Rc::new(UdpSender {
             socket_ipv4: socket_ipv4.clone(),
@@ -475,6 +523,8 @@ impl Client {
             body: request.body,
         };
 
+        self.settle_idle_connection();
+
         let should_reconnect = {
             let mut state = self.state.borrow_mut();
 
@@ -484,13 +534,18 @@ impl Client {
             state.error = None;
             state.finished = false;
             state.pending_body = None;
+            state.request_sent = false;
+            state.is_unprocessed = false;
+            state.is_oversized = false;
 
-            let needs_new_connection =
-                state.current_connection_index.is_none() || !state.connection_ready;
+            let needs_new_connection = state.current_connection_index.is_none()
+                || !state.connection_ready
+                || state.is_connection_draining;
 
             if needs_new_connection {
                 state.http3 = None;
                 state.connection_ready = false;
+                state.is_connection_draining = false;
             }
 
             state.active_stream_id = None;
@@ -499,17 +554,48 @@ impl Client {
             needs_new_connection
         };
 
-        if should_reconnect {
-            self.connect()?;
+        let outcome = if should_reconnect {
+            self.connect()
+        } else {
+            Ok(())
+        };
+        let outcome = match outcome {
+            Ok(()) => self.run().await,
+            Err(error) => Err(error),
+        };
+        let state = self.state.borrow();
+        let failure = match outcome {
+            Err(error) => Some(error.to_string()),
+            Ok(()) => state.error.clone(),
+        };
+
+        if let Some(reason) = failure {
+            return Err(Box::new(state.classify_failure(reason)));
         }
 
-        self.run().await?;
-
-        if let Some(err_message) = self.state.borrow().error.clone() {
-            return Err(err_message.into());
-        }
+        drop(state);
 
         Ok(self.build_response())
+    }
+
+    fn settle_idle_connection(&mut self) {
+        let Some(index) = self.state.borrow().current_connection_index else {
+            return;
+        };
+
+        let _ = self.read_socket();
+
+        self.endpoint.on_timeout(Instant::now());
+
+        let _ = self.endpoint.process_connections();
+
+        let is_usable = self.endpoint.conn_get_mut(index).is_some_and(|connection| {
+            !connection.is_draining() && !connection.is_closing() && !connection.is_closed()
+        });
+
+        if !is_usable {
+            self.state.borrow_mut().connection_ready = false;
+        }
     }
 
     fn connect(&mut self) -> AnyError<()> {
@@ -627,6 +713,7 @@ impl Client {
                 }
 
                 state_mut.active_stream_id = Some(stream_id);
+                state_mut.request_sent = true;
 
                 if has_body {
                     state_mut.pending_body = request.body.map(Bytes::from);
@@ -952,6 +1039,22 @@ impl TransportHandler for ClientHandler {
                             }
 
                             let mut state_mut = self.state.borrow_mut();
+                            let received = state_mut.response_body.len() + read_length;
+
+                            if state_mut
+                                .response_body_limit
+                                .is_some_and(|limit| received > limit)
+                            {
+                                state_mut.is_oversized = true;
+                                state_mut.active_stream_id = None;
+                                state_mut.fail("the response body passed its limit".to_string());
+                                drop(state_mut);
+
+                                let _ = connection.close(true, 0x00, b"oversized");
+
+                                return;
+                            }
+
                             state_mut
                                 .response_body
                                 .extend_from_slice(&buffer_bytes[..read_length]);
@@ -977,36 +1080,48 @@ impl TransportHandler for ClientHandler {
                         if state_mut.active_stream_id == Some(stream_id) {
                             state_mut.active_stream_id = None;
                         }
+
+                        if state_mut.response_status.is_none() {
+                            state_mut.fail(
+                                "the stream ended before a response status arrived".to_string(),
+                            );
+                        }
+
                         state_mut.finished = true;
                     }
 
                     return;
                 }
 
-                Ok((stream_id, Http3Event::Reset(_))) => {
+                Ok((stream_id, Http3Event::Reset(code))) => {
                     {
                         let mut state_mut = self.state.borrow_mut();
                         if state_mut.active_stream_id == Some(stream_id) {
                             state_mut.active_stream_id = None;
                         }
-                        state_mut.fail("stream reset".to_string());
+                        state_mut.is_unprocessed = code == Http3Error::RequestRejected.to_wire();
+                        state_mut.fail(format!("stream reset with code {code:#x}"));
                     }
                     let _ = connection.close(true, 0x00, b"reset");
 
                     return;
                 }
 
-                Ok((stream_id, Http3Event::GoAway)) => {
-                    {
-                        let mut state_mut = self.state.borrow_mut();
-                        if state_mut.active_stream_id == Some(stream_id) {
-                            state_mut.active_stream_id = None;
-                        }
-                        state_mut.fail("goaway".to_string());
-                    }
-                    let _ = connection.close(true, 0x00, b"goaway");
+                Ok((goaway_id, Http3Event::GoAway)) => {
+                    let mut state_mut = self.state.borrow_mut();
 
-                    return;
+                    state_mut.is_connection_draining = true;
+
+                    if state_mut
+                        .active_stream_id
+                        .is_some_and(|stream_id| stream_id >= goaway_id)
+                    {
+                        state_mut.active_stream_id = None;
+                        state_mut.is_unprocessed = true;
+                        state_mut.fail(format!("the server goes away below stream {goaway_id}"));
+
+                        return;
+                    }
                 }
 
                 Ok((_, Http3Event::PriorityUpdate)) => {}
@@ -1405,7 +1520,18 @@ mod loopback_tests {
         _runtime: tokio::runtime::Runtime,
     }
 
+    #[derive(Clone, Copy, PartialEq)]
+    enum Departure {
+        Stays,
+        GoesAwayAfterAccepting,
+        ClosesAfterAnswering,
+    }
+
     fn serve_loopback(stream_window: u32) -> Loopback {
+        serve_loopback_departing(stream_window, Departure::Stays)
+    }
+
+    fn serve_loopback_departing(stream_window: u32, departure: Departure) -> Loopback {
         let certified = rcgen::generate_simple_self_signed(vec![
             "localhost".to_string(),
             "127.0.0.1".to_string(),
@@ -1449,7 +1575,7 @@ mod loopback_tests {
         };
         let address = endpoint.local_addr().unwrap();
 
-        runtime.spawn(serve_connections(endpoint));
+        runtime.spawn(serve_connections(endpoint, departure));
 
         Loopback {
             address,
@@ -1458,12 +1584,23 @@ mod loopback_tests {
         }
     }
 
-    async fn serve_connections(endpoint: quinn::Endpoint) {
+    async fn serve_connections(endpoint: quinn::Endpoint, departure: Departure) {
+        let mut connections = 0;
+
         while let Some(incoming) = endpoint.accept().await {
+            connections += 1;
+
+            let departure = if connections == 1 {
+                departure
+            } else {
+                Departure::Stays
+            };
+
             tokio::spawn(async move {
                 let Ok(connection) = incoming.await else {
                     return;
                 };
+                let closer = connection.clone();
                 let Ok(mut http3) =
                     h3::server::Connection::<_, Bytes>::new(h3_quinn::Connection::new(connection))
                         .await
@@ -1472,12 +1609,25 @@ mod loopback_tests {
                 };
 
                 while let Ok(Some(resolver)) = http3.accept().await {
+                    let closer = closer.clone();
+
+                    if departure == Departure::GoesAwayAfterAccepting {
+                        let _ = http3.shutdown(1).await;
+                    }
+
                     tokio::spawn(async move {
                         if let Ok((request, stream)) = resolver.resolve_request().await {
                             answer_request(request, stream).await;
                         }
+
+                        if departure == Departure::ClosesAfterAnswering {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            closer.close(0u32.into(), b"done");
+                        }
                     });
                 }
+
+                tokio::time::sleep(Duration::from_secs(1)).await;
             });
         }
     }
@@ -1492,18 +1642,39 @@ mod loopback_tests {
             received += chunk.remaining();
         }
 
-        if request.uri().path() == "/reset" {
-            stream.stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
+        match request.uri().path() {
+            "/reset" => {
+                stream.stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
 
-            return;
+                return;
+            }
+
+            "/rejected" => {
+                stream.stop_stream(h3::error::Code::H3_REQUEST_REJECTED);
+
+                return;
+            }
+
+            _ => {}
         }
 
         let response = http::Response::builder().status(200).body(()).unwrap();
+        let body = if request.uri().path() == "/large" {
+            Bytes::from(vec![b'a'; 64 * 1024])
+        } else {
+            Bytes::from(received.to_string())
+        };
 
         if stream.send_response(response).await.is_ok() {
-            let _ = stream.send_data(Bytes::from(received.to_string())).await;
+            let _ = stream.send_data(body).await;
             let _ = stream.finish().await;
         }
+    }
+
+    fn read_failure(outcome: AnyError<Response>) -> Option<RequestFailure> {
+        outcome
+            .err()
+            .and_then(|error| error.downcast_ref::<RequestFailure>().cloned())
     }
 
     fn request_loopback(
@@ -1554,13 +1725,80 @@ mod loopback_tests {
     #[test]
     fn a_stream_the_peer_resets_is_a_failure_of_the_request() {
         let loopback = serve_loopback(1 << 20);
-        let mut client = build_trusting_client(&loopback);
-        let outcome = request_loopback(&mut client, &loopback, "/reset", None);
+        let cancelled = read_failure(request_loopback(
+            &mut build_trusting_client(&loopback),
+            &loopback,
+            "/reset",
+            None,
+        ));
+        let rejected = read_failure(request_loopback(
+            &mut build_trusting_client(&loopback),
+            &loopback,
+            "/rejected",
+            None,
+        ));
 
         assert!(
-            outcome.is_err(),
-            "a stream that is reset before its response arrived carries no answer; handed on as a response it has no status and an empty body, got {:?}",
-            outcome.map(|response| response.status)
+            matches!(cancelled, Some(RequestFailure::Failed(_)))
+                && matches!(rejected, Some(RequestFailure::Unprocessed(_))),
+            "a stream that is reset before its response arrived carries no answer, and only a reset that says the request was rejected tells that the server did not process it, so only that one may be sent again elsewhere; got {cancelled:?} and {rejected:?}"
+        );
+    }
+
+    #[test]
+    fn a_server_that_goes_away_finishes_the_requests_below_its_limit() {
+        let loopback = serve_loopback_departing(1 << 20, Departure::GoesAwayAfterAccepting);
+        let mut client = build_trusting_client(&loopback);
+        let finished = request_loopback(&mut client, &loopback, "/", None)
+            .map(|response| response.status)
+            .ok();
+        let next = request_loopback(&mut client, &loopback, "/", None)
+            .map(|response| response.status)
+            .ok();
+
+        assert_eq!(
+            (finished, next),
+            (Some(200), Some(200)),
+            "a GOAWAY names the first request the server will not process, so a request below it is answered as usual and the next request goes out on a new connection"
+        );
+    }
+
+    #[test]
+    fn a_connection_the_server_closed_while_idle_is_replaced_before_a_request() {
+        let loopback = serve_loopback_departing(1 << 20, Departure::ClosesAfterAnswering);
+        let mut client = build_trusting_client(&loopback);
+        let first = request_loopback(&mut client, &loopback, "/", None)
+            .map(|response| response.status)
+            .ok();
+
+        std::thread::sleep(Duration::from_millis(300));
+
+        let second = request_loopback(&mut client, &loopback, "/", None)
+            .map(|response| response.status)
+            .map_err(|error| error.to_string());
+
+        assert_eq!(
+            (first, second),
+            (Some(200), Ok(200)),
+            "the packets a kept connection received while it was idle are read before the next request, so a connection the server closed meanwhile is replaced instead of carrying the request into a close"
+        );
+    }
+
+    #[test]
+    fn a_response_body_past_the_limit_stops_the_request() {
+        let loopback = serve_loopback(1 << 20);
+        let mut client = Client::new(Some(ClientProtocolOptions {
+            root_certificates: Some(loopback.roots.path().to_string_lossy().into_owned()),
+            response_body_limit: Some(16 * 1024),
+            ..Default::default()
+        }))
+        .unwrap();
+        let outcome = read_failure(request_loopback(&mut client, &loopback, "/large", None));
+
+        assert_eq!(
+            outcome,
+            Some(RequestFailure::Oversized(16 * 1024)),
+            "a response body is read only up to the limit its caller can deliver; read whole first, an endless or huge body holds memory the caller refuses afterwards"
         );
     }
 
